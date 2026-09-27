@@ -1,114 +1,104 @@
-# ARC-AGI-3 For Fun
+# ARC-AGI-2 For Fun
 
-A small research scaffold for ARC Prize 2026 — ARC-AGI-3.
+This repository has been rebuilt for **ARC Prize 2026 — ARC-AGI-2**.
 
-The immediate goal is intentionally modest: prove the full loop from a compartmentalized local policy to a valid Kaggle submission before adding grammatical search, genetic programming, learned world models, or MCTS.
+ARC-AGI-2 is not an interactive environment. There are no actions, game states, or rollout server. Each task provides a few demonstration input/output grid pairs and one or more test input grids. The solver must infer a transformation and produce exactly two candidate output grids for every test input.
 
-## Architecture
-
-```text
-ARC frame/history
-      ↓
-observation helpers
-      ↓
-policy
-      ↓
-competition adapter (MyAgent)
-      ↓
-official ARC environment
-      ↓
-scorecard / transition evidence
-```
-
-The first policy is a deterministic **null baseline**. It uses no learning, no game-specific strategy, and no randomness. It exists to validate plumbing and provide a frozen baseline.
-
-The intended research path is:
+The core loop is now:
 
 ```text
-perception
-  → evidence memory
-  → grammar-generated transition hypotheses
-  → hypothesis scoring
-  → internal world model
-  → stochastic / MCTS planning
-  → one real ARC action
+task
+  ↓
+demonstration input/output pairs
+  ↓
+candidate program / transformation generation
+  ↓
+exact + diagnostic scoring on demonstrations
+  ↓
+candidate ranking / search
+  ↓
+two retained programs
+  ↓
+apply to test input(s)
+  ↓
+attempt_1 + attempt_2
+  ↓
+submission.json
 ```
 
-Real environment actions are evidence. Future MCTS rollouts should happen in an inferred internal model rather than treating the hidden competition environment as a free simulator.
+This is deliberately aligned with grammar-guided genetic programming / stochastic tree search. A future MCTS does not search game states; it searches the tree of **partial programs produced by grammar rules**.
 
-## WSL quick start
-
-Requirements:
-- Ubuntu/WSL
-- Python 3.12
-- git
-- make
+## Quick start in WSL
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/Logan-Kelsch/ARC-AGI-3_For_Fun.git
 cd ARC-AGI-3_For_Fun
+
 make setup
-make list-games
-make verify-local
+make data
+make test
+make evaluate
 ```
 
-To inspect one game:
+`make data` clones the official public ARC-AGI-2 repository into `data/ARC-AGI-2`.
+
+The official public dataset contains 1,000 training tasks and 120 public evaluation tasks. The evaluation set should be treated as held out during method development.
+
+## Inspect a task
 
 ```bash
-make play-local GAME=ls20 STEPS=80
+make list-tasks SPLIT=training
+make inspect TASK=<task_id> SPLIT=training
 ```
 
-To build the Kaggle deployment notebook:
+## Evaluate a replaceable solver
+
+Two solver compartments are included:
+
+- `null`: identity + zero-grid sanity baseline.
+- `primitive`: tiny program search over identity, flips, rotations, and transpose.
+
+```bash
+make evaluate SOLVER=null SPLIT=evaluation
+make evaluate SOLVER=primitive SPLIT=evaluation
+```
+
+The primitive solver is **not intended to be competitive**. It demonstrates the architecture we need for the real project.
+
+## Kaggle path
+
+The competition rerun swaps in unseen `arc-agi_test_challenges.json` tasks. The output must be `submission.json`, include every task id, and provide exactly `attempt_1` and `attempt_2` for each test input.
 
 ```bash
 make notebook
-```
-
-Before the first Kaggle push, place your token in `.kaggle/access_token` and replace `REPLACE_WITH_YOUR_USERNAME` in `notebooks/kernel-metadata.json`.
-
-Then:
-
-```bash
 make submit
 make status
 ```
 
-After the Kaggle notebook commit completes, deliberately submit its generated `submission.parquet` to the competition. That competition rerun is the hidden evaluation; local public games are for development and are not an exact proxy for the hidden leaderboard distribution.
+See `docs/KAGGLE.md`.
 
-## Teaching notebook
-
-Open `notebooks/01_null_agent_walkthrough.ipynb`.
-
-It walks from the null policy through the local evaluation loop and shows exactly where grammar search / world-model induction / MCTS will later plug in.
-
-## Repository layout
+## Repository structure
 
 ```text
-agent/my_agent.py                    thin competition-facing adapter
-src/arc_fun/observations.py          frame/grid helpers
-src/arc_fun/policy.py                null policy + policy protocol
-src/arc_fun/evaluation.py            transition/episode summaries
-scripts/play_local.py                real local ARC engine loop
-scripts/build_submission_notebook.py Kaggle notebook generator
-scripts/slim_framework.py            trims optional agent-framework imports
-notebooks/01_null_agent_walkthrough.ipynb
-notebooks/kernel-metadata.json
+src/arc_agi2_fun/
+  data.py
+  scoring.py
+  programs.py
+  search.py
+  solver.py
+  registry.py
+  evaluation.py
+  submission.py
+  visualize.py
+
+scripts/
+notebooks/
+docs/
 tests/
 ```
 
 ## Design rule
 
-The local evaluator, teaching notebook, and Kaggle `MyAgent` must all call the same policy implementation. We do not want a notebook solver and a separate competition solver drifting apart.
+The evaluator and Kaggle notebook call the **same solver implementation**. Search algorithms may change; task loading, exact scoring, and submission formatting should remain fixed.
 
-## Local arcade and single-game policy evaluation
-
-For a complete local arcade setup, see `docs/ARCADE_SETUP.md`.
-
-```bash
-make setup
-make arcade-cache
-make arcade-list
-make evaluate-game GAME=ls20 POLICY=null SEED=0 STEPS=80
-```
-
-`notebooks/02_arcade_policy_evaluator.ipynb` provides the same loop interactively. The evaluator calls the official ARC environment and official local scorecard while keeping the policy replaceable through `src/arc_fun/policy_registry.py`.
+The repository name still contains `ARC-AGI-3` because renaming the GitHub repository is separate from changing its contents.
