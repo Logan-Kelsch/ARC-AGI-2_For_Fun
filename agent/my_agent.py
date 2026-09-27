@@ -12,17 +12,18 @@ _repo_src = Path(__file__).resolve().parents[1] / "src"
 if _repo_src.exists():
     sys.path.insert(0, str(_repo_src))
 
-from arc_fun.policy import NullPolicy
+from arc_fun.policy_registry import create_policy
 
 
 class MyAgent(Agent):
     """Competition-facing adapter. Replace policy internals, not this loop."""
 
     MAX_ACTIONS = 80
+    DEFAULT_POLICY = "null"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.policy = NullPolicy()
+        self.policy = create_policy(self.DEFAULT_POLICY)
         self.policy.reset()
 
     @property
