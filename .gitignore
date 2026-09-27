@@ -4,10 +4,7 @@ __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
 .kaggle/
-vendor/
-environment_files/
-recordings/
-reference/
-logs.log
-notebooks/submission.ipynb
+data/
 results/
+notebooks/submission.ipynb
+.DS_Store
