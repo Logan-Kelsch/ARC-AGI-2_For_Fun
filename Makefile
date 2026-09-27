@@ -23,7 +23,7 @@ help:
 setup:
 	$(PYTHON) -m venv $(VENV)
 	$(VENV_PIP) install --upgrade pip
-	$(VENV_PIP) install "arc-agi>=0.9.6" "kaggle>=2.2" python-dotenv pandas pyarrow nbformat pytest
+	$(VENV_PIP) install "arc-agi>=0.9.6" "kaggle>=2.2" python-dotenv numpy pandas pyarrow nbformat pytest
 	@if [ ! -d "$(FRAMEWORK_DIR)/.git" ]; then \
 		mkdir -p vendor && git clone --depth 1 $(FRAMEWORK_REPO) $(FRAMEWORK_DIR); \
 	else \
