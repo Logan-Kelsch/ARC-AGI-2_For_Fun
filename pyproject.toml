@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arc-agi2-for-fun"
+version = "0.1.0"
+description = "ARC-AGI-2 program-synthesis research scaffold"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "matplotlib>=3.8",
+  "pandas>=2.2",
+  "nbformat>=5.10",
+  "kaggle>=2.2"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
