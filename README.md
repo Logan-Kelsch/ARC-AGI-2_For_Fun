@@ -99,3 +99,16 @@ tests/
 ## Design rule
 
 The local evaluator, teaching notebook, and Kaggle `MyAgent` must all call the same policy implementation. We do not want a notebook solver and a separate competition solver drifting apart.
+
+## Local arcade and single-game policy evaluation
+
+For a complete local arcade setup, see `docs/ARCADE_SETUP.md`.
+
+```bash
+make setup
+make arcade-cache
+make arcade-list
+make evaluate-game GAME=ls20 POLICY=null SEED=0 STEPS=80
+```
+
+`notebooks/02_arcade_policy_evaluator.ipynb` provides the same loop interactively. The evaluator calls the official ARC environment and official local scorecard while keeping the policy replaceable through `src/arc_fun/policy_registry.py`.
