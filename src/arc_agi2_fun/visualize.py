@@ -13,6 +13,15 @@ ARC_COLORS = [
 ARC_CMAP = ListedColormap(ARC_COLORS)
 
 
+def plot_grid(grid: Grid, title: str = "ARC grid", ax=None):
+    """Render one ARC grid and return its matplotlib axis."""
+    if ax is None:
+        _, ax = plt.subplots(figsize=(4, 4))
+    _draw(ax, grid, title)
+    plt.tight_layout()
+    return ax
+
+
 def _draw(ax, grid: Grid, title: str) -> None:
     data = np.asarray(grid)
     ax.imshow(data, cmap=ARC_CMAP, vmin=0, vmax=9, interpolation="nearest")

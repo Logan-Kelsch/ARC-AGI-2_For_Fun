@@ -51,6 +51,16 @@ make list-tasks SPLIT=training
 make inspect TASK=<task_id> SPLIT=training
 ```
 
+## Custom tensor playground
+
+For manual modeling experiments, open:
+
+`notebooks/02_custom_tensor_playground.ipynb`
+
+It lets you select any public task and example, render the input/output, convert the ARC grid to a lossless `H × W × 10` tensor, apply arbitrary NumPy/model operations, render the decoded prediction, and evaluate it against the known target using exact match and diagnostic cell accuracy.
+
+The third dimension is one channel per ARC color. Model outputs may be one-hot tensors, probabilities, logits, or arbitrary channel scores; they are decoded with `argmax`.
+
 ## Evaluate a replaceable solver
 
 Two solver compartments are included:
@@ -90,6 +100,7 @@ src/arc_agi2_fun/
   evaluation.py
   submission.py
   visualize.py
+  tensors.py
 
 scripts/
 notebooks/
