@@ -6,14 +6,21 @@ FRAMEWORK_DIR := vendor/ARC-AGI-3-Agents
 FRAMEWORK_REPO := https://github.com/arcprize/ARC-AGI-3-Agents.git
 GAME ?=
 STEPS ?= 120
+POLICY ?= null
+SEED ?= 0
+MODE ?= offline
+RENDER ?=
 KAGGLE := KAGGLE_API_TOKEN=$$(cat .kaggle/access_token) $(VENV)/bin/kaggle
 
-.PHONY: help setup test list-games play-local verify-local notebook submit status clean
+.PHONY: help setup test list-games arcade-cache arcade-list evaluate-game play-local verify-local notebook submit status clean
 
 help:
 	@echo "make setup"
 	@echo "make test"
 	@echo "make list-games"
+	@echo "make arcade-cache"
+	@echo "make arcade-list"
+	@echo "make evaluate-game GAME=ls20 POLICY=null SEED=0 STEPS=80"
 	@echo "make play-local GAME=ls20 STEPS=120"
 	@echo "make verify-local"
 	@echo "make notebook"
@@ -36,6 +43,16 @@ test:
 
 list-games:
 	PYTHONPATH=src $(VENV_PY) scripts/play_local.py --list
+
+arcade-cache:
+	PYTHONPATH=src $(VENV_PY) scripts/cache_arcade.py
+
+arcade-list:
+	PYTHONPATH=src $(VENV_PY) scripts/cache_arcade.py --list
+
+evaluate-game:
+	@if [ -z "$(GAME)" ]; then echo "Set GAME, e.g. make evaluate-game GAME=ls20"; exit 1; fi
+	PYTHONPATH=src $(VENV_PY) scripts/evaluate_arcade.py --game $(GAME) --policy $(POLICY) --seed $(SEED) --max-actions $(STEPS) --mode $(MODE) $(if $(RENDER),--render $(RENDER))
 
 play-local:
 	PYTHONPATH=src $(VENV_PY) scripts/play_local.py $(if $(GAME),--game $(GAME)) --max-steps $(STEPS)
