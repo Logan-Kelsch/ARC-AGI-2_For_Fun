@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -9,6 +10,11 @@ from arc_agi import Arcade, OperationMode
 from arcengine import FrameData, FrameDataRaw, GameState
 
 from .policy_registry import create_policy
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENVIRONMENTS_DIR = REPO_ROOT / "environment_files"
+RECORDINGS_DIR = REPO_ROOT / "recordings"
 
 
 def short_game_id(game_id: str) -> str:
@@ -29,8 +35,12 @@ def _operation_mode(mode: str) -> OperationMode:
 
 
 def make_arcade(mode: str = "offline") -> Arcade:
-    """Create the official ARC arcade in normal or fully cached/offline mode."""
-    return arc_agi.Arcade(operation_mode=_operation_mode(mode))
+    """Create ARC using repo-root cache paths, independent of process cwd."""
+    return arc_agi.Arcade(
+        operation_mode=_operation_mode(mode),
+        environments_dir=str(ENVIRONMENTS_DIR),
+        recordings_dir=str(RECORDINGS_DIR),
+    )
 
 
 def list_games(mode: str = "offline") -> list[dict[str, Any]]:

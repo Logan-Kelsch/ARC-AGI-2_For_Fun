@@ -4,7 +4,7 @@ This project uses the official `arc-agi` Python package. You do not manually dow
 
 The first cache pass uses `OperationMode.NORMAL`: it contacts the ARC service, discovers the currently public environments, and materializes each game locally by calling `arcade.make(...)`. The package caches those environments under the project environment cache (normally `environment_files/`).
 
-After that, the evaluator can use `OperationMode.OFFLINE`, so the inner experiment loop does not need the service.
+After that, the evaluator can use `OperationMode.OFFLINE`, so the inner experiment loop does not need the service. The evaluator resolves `environment_files/` from the repository root rather than from the current working directory, so terminal scripts and notebooks see the same cache.
 
 ## 1. WSL prerequisites
 
