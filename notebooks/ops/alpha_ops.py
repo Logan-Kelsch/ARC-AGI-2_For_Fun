@@ -3,73 +3,31 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TypeAlias
 
+import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LinearSegmentedColormap
 
-from arc_agi2_fun.visualize import plot_grid
+from arc_agi2_fun.visualize import ARC_COLORS
 
 KernelLike: TypeAlias = Sequence[float] | Sequence[Sequence[float]] | np.ndarray
 
-# Every default is centered on the pixel being evaluated.
-#
-# For the directional masks, the center is the middle entry. The non-center
-# 1s select the neighbors whose absolute difference from the center is measured.
-#
-# The quadrant masks are represented on 3x3 grids so that the anchor remains
-# unambiguous and odd-sized.
 DEFAULT_ABS_KERNELS: dict[str, np.ndarray] = {
     "self": np.array([1], dtype=float),
     "left": np.array([1, 1, 0], dtype=float),
     "right": np.array([0, 1, 1], dtype=float),
     "up": np.array([[1], [1], [0]], dtype=float),
     "down": np.array([[0], [1], [1]], dtype=float),
-    "lower_left": np.array(
-        [
-            [0, 0, 0],
-            [1, 1, 0],
-            [1, 1, 0],
-        ],
-        dtype=float,
-    ),
-    "upper_left": np.array(
-        [
-            [1, 1, 0],
-            [1, 1, 0],
-            [0, 0, 0],
-        ],
-        dtype=float,
-    ),
-    "upper_right": np.array(
-        [
-            [0, 1, 1],
-            [0, 1, 1],
-            [0, 0, 0],
-        ],
-        dtype=float,
-    ),
-    "lower_right": np.array(
-        [
-            [0, 0, 0],
-            [0, 1, 1],
-            [0, 1, 1],
-        ],
-        dtype=float,
-    ),
-    "star_3": np.array(
-        [
-            [0, 1, 0],
-            [1, 1, 1],
-            [0, 1, 0],
-        ],
-        dtype=float,
-    ),
+    "lower_left": np.array([[0, 0, 0], [1, 1, 0], [1, 1, 0]], dtype=float),
+    "upper_left": np.array([[1, 1, 0], [1, 1, 0], [0, 0, 0]], dtype=float),
+    "upper_right": np.array([[0, 1, 1], [0, 1, 1], [0, 0, 0]], dtype=float),
+    "lower_right": np.array([[0, 0, 0], [0, 1, 1], [0, 1, 1]], dtype=float),
+    "star_3": np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=float),
     "full_3x3": np.ones((3, 3), dtype=float),
 }
 
 
 def _normalize_kernel(kernel: KernelLike) -> np.ndarray:
-    """Convert a 1D/2D kernel to an odd-sized 2D floating-point array."""
     resolved = np.asarray(kernel, dtype=float)
-
     if resolved.ndim == 1:
         resolved = resolved.reshape(1, -1)
     elif resolved.ndim != 2:
@@ -87,147 +45,154 @@ def _normalize_kernel(kernel: KernelLike) -> np.ndarray:
         raise ValueError("kernel contains NaN or infinite values.")
     if not np.any(resolved):
         raise ValueError("kernel must contain at least one non-zero value.")
-
     return resolved
 
 
-def _validate_matrix(matrix: np.ndarray | Sequence) -> np.ndarray:
-    """Accept either HxW scalar data or HxWxC feature/tensor data."""
-    array = np.asarray(matrix, dtype=float)
-
-    if array.ndim not in (2, 3):
-        raise ValueError(
-            "matrix must be HxW or HxWxC; "
-            f"received shape {array.shape}."
-        )
+def _categorical_grid_to_channels(
+    grid: np.ndarray | Sequence,
+) -> dict[int, np.ndarray]:
+    """Split an ARC HxW grid into binary channels without treating colors numerically."""
+    array = np.asarray(grid)
+    if array.ndim != 2:
+        raise ValueError(f"categorical ARC input must be HxW, got {array.shape}.")
     if array.shape[0] == 0 or array.shape[1] == 0:
-        raise ValueError("matrix spatial dimensions may not be empty.")
+        raise ValueError("grid dimensions may not be empty.")
     if not np.all(np.isfinite(array)):
-        raise ValueError("matrix contains NaN or infinite values.")
+        raise ValueError("grid contains NaN or infinite values.")
+    if not np.all(array == np.floor(array)):
+        raise ValueError("ARC grid values are categorical integers, not continuous.")
+    if np.any((array < 0) | (array > 9)):
+        raise ValueError("ARC colors must be integers from 0 to 9.")
 
-    return array
-
-
-def _reduce_feature_difference(diff: np.ndarray) -> np.ndarray:
-    """Reduce vector-valued pixels to one scalar absolute response per pixel."""
-    if diff.ndim == 2:
-        return diff
-    return np.mean(diff, axis=-1)
-
-
-def _self_magnitude(matrix: np.ndarray) -> np.ndarray:
-    absolute = np.abs(matrix)
-    if absolute.ndim == 2:
-        return absolute
-    return np.mean(absolute, axis=-1)
+    categorical = array.astype(np.int8)
+    return {
+        int(color): (categorical == color).astype(float)
+        for color in np.unique(categorical)
+    }
 
 
-def _abs_kernel_response(matrix: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    """Evaluate one center-anchored absolute-difference neighborhood kernel."""
-    height, width = matrix.shape[:2]
-    kernel_height, kernel_width = kernel.shape
-    center_y = kernel_height // 2
-    center_x = kernel_width // 2
+def _tensor_to_channels(tensor: np.ndarray) -> dict[int, np.ndarray]:
+    """Interpret HxWx10 as already-separated color intensity channels."""
+    array = np.asarray(tensor, dtype=float)
+    if array.ndim != 3 or array.shape[-1] != 10:
+        raise ValueError("3D input must be HxWx10, one channel per ARC color.")
+    if array.shape[0] == 0 or array.shape[1] == 0:
+        raise ValueError("tensor spatial dimensions may not be empty.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("tensor contains NaN or infinite values.")
+    if np.any((array < 0.0) | (array > 1.0)):
+        raise ValueError("color-channel intensities must be in [0, 1].")
 
-    non_center_terms: list[tuple[int, int, float]] = []
-    for kernel_y in range(kernel_height):
-        for kernel_x in range(kernel_width):
-            weight = float(kernel[kernel_y, kernel_x])
-            if weight == 0:
-                continue
+    return {
+        color: array[..., color].copy()
+        for color in range(10)
+        if np.any(array[..., color] > 0)
+    }
 
-            dy = kernel_y - center_y
-            dx = kernel_x - center_x
-            if dy == 0 and dx == 0:
-                continue
 
-            non_center_terms.append((dy, dx, abs(weight)))
+def _resolve_color_channels(
+    matrix: np.ndarray | Sequence,
+) -> dict[int, np.ndarray]:
+    array = np.asarray(matrix)
+    if array.ndim == 2:
+        return _categorical_grid_to_channels(array)
+    if array.ndim == 3:
+        return _tensor_to_channels(array)
+    raise ValueError(
+        "matrix must be a categorical HxW ARC grid or HxWx10 color-intensity tensor."
+    )
 
-    # A self-only kernel is useful as the zeroth-order survey: the absolute
-    # magnitude of the current scalar/vector pixel.
-    if not non_center_terms:
-        return _self_magnitude(matrix)
 
-    pad_y = center_y
-    pad_x = center_x
-    if matrix.ndim == 2:
-        pad_width = ((pad_y, pad_y), (pad_x, pad_x))
-    else:
-        pad_width = ((pad_y, pad_y), (pad_x, pad_x), (0, 0))
+def _kernel_intensity_response(
+    channel: np.ndarray,
+    kernel: np.ndarray,
+) -> np.ndarray:
+    """Sum literal kernel intensity contributions and saturate at 1."""
+    height, width = channel.shape
+    kh, kw = kernel.shape
+    cy, cx = kh // 2, kw // 2
 
-    # Edge padding avoids manufacturing artificial high responses solely
-    # because a pixel sits on the image boundary.
-    padded = np.pad(matrix, pad_width, mode="edge")
+    padded = np.pad(
+        channel,
+        ((cy, cy), (cx, cx)),
+        mode="constant",
+        constant_values=0.0,
+    )
 
     response = np.zeros((height, width), dtype=float)
-    total_weight = 0.0
+    for ky in range(kh):
+        for kx in range(kw):
+            weight = abs(float(kernel[ky, kx]))
+            if weight == 0:
+                continue
+            sampled = padded[ky : ky + height, kx : kx + width]
+            response += weight * sampled
 
-    for dy, dx, weight in non_center_terms:
-        neighbor = padded[
-            pad_y + dy : pad_y + dy + height,
-            pad_x + dx : pad_x + dx + width,
-            ...,
-        ]
-        difference = _reduce_feature_difference(np.abs(matrix - neighbor))
-        response += weight * difference
-        total_weight += weight
-
-    if total_weight == 0:
-        return response
-
-    return response / total_weight
+    return np.clip(response, 0.0, 1.0)
 
 
-def _response_to_plot_grid(
-    response: np.ndarray,
+def _evaluate_kernel(
+    channels: dict[int, np.ndarray],
+    kernel: np.ndarray,
+) -> dict[int, np.ndarray]:
+    return {
+        color: _kernel_intensity_response(channel, kernel)
+        for color, channel in channels.items()
+    }
+
+
+def _color_intensity_cmap(color: int) -> LinearSegmentedColormap:
+    return LinearSegmentedColormap.from_list(
+        f"arc_color_{color}_intensity",
+        ["#000000", ARC_COLORS[color]],
+    )
+
+
+def _plot_color_responses(
+    responses: dict[int, np.ndarray],
     *,
-    scale_max: float,
-) -> list[list[int]]:
-    """Map a floating response map to ARC colors 0..9 for visualization only."""
-    if scale_max <= 0:
-        return np.zeros(response.shape, dtype=int).tolist()
+    kernel_name: str,
+) -> None:
+    colors = list(responses)
+    columns = min(5, max(1, len(colors)))
+    rows = int(np.ceil(len(colors) / columns))
 
-    visual = np.rint(9.0 * np.clip(response / scale_max, 0.0, 1.0))
-    return visual.astype(int).tolist()
-
-
-def _plot_responses(responses: dict[str, np.ndarray]) -> None:
-    """Render raw response maps through the repository's ARC plot_grid helper."""
-    import matplotlib.pyplot as plt
-
-    names = list(responses)
-    columns = 3
-    rows = int(np.ceil(len(names) / columns))
     figure, axes = plt.subplots(
         rows,
         columns,
-        figsize=(4 * columns, 4 * rows),
+        figsize=(3.5 * columns, 3.5 * rows),
         squeeze=False,
-    )
-
-    global_max = max(
-        (float(np.max(response)) for response in responses.values()),
-        default=0.0,
     )
 
     for ax in axes.flat:
         ax.axis("off")
 
-    for ax, name in zip(axes.flat, names):
+    for ax, color in zip(axes.flat, colors):
         ax.axis("on")
-        response = responses[name]
-        plot_grid(
-            _response_to_plot_grid(response, scale_max=global_max),
-            title=f"{name} | raw max={float(np.max(response)):.4g}",
-            ax=ax,
+        ax.imshow(
+            responses[color],
+            cmap=_color_intensity_cmap(color),
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
         )
+        ax.set_title(f"color {color} | {kernel_name}")
+        ax.set_xticks([])
+        ax.set_yticks([])
 
     figure.suptitle(
-        "survey_abs_kernels responses "
-        "(shared 0-9 visualization scale; returned arrays remain raw)"
+        f"survey_abs_kernels: {kernel_name} "
+        "(0 = no intensity, 1 = full intensity)"
     )
     plt.tight_layout()
     plt.show()
+
+
+def _plot_all_responses(
+    responses: dict[str, dict[int, np.ndarray]],
+) -> None:
+    for kernel_name, color_responses in responses.items():
+        _plot_color_responses(color_responses, kernel_name=kernel_name)
 
 
 def survey_abs_kernels(
@@ -235,59 +200,37 @@ def survey_abs_kernels(
     kernel: str | KernelLike = "all",
     *,
     plot: bool = False,
-) -> dict[str, np.ndarray] | np.ndarray:
-    """Survey local absolute differences with one or many center-anchored kernels.
+) -> dict[str, dict[int, np.ndarray]] | dict[int, np.ndarray]:
+    """Survey categorical ARC color channels with additive intensity kernels.
 
-    Parameters
-    ----------
-    matrix:
-        Either an HxW scalar matrix or an HxWxC feature tensor. This works
-        directly with the HxWx10 one-hot ARC tensors from grid_to_tensor().
+    ARC grid values are categorical labels. A value of 8 means color 8, not a
+    larger magnitude than color 2.
 
-    kernel:
-        - "all": evaluate the complete DEFAULT_ABS_KERNELS bank and return a
-          dict mapping kernel name -> HxW response.
-        - a default kernel name such as "left" or "full_3x3": evaluate that
-          single kernel and return its HxW response.
-        - any custom 1D/2D list or NumPy array with odd dimensions.
+    For a normal HxW grid, each detected color becomes a binary intensity
+    channel. Kernel values then contribute literally to that channel. There is
+    no normalization or averaging by kernel size/weight.
 
-        Non-zero non-center entries select neighbors. Their absolute numeric
-        values act as weights. The center of the kernel is the anchor pixel.
-
-    plot:
-        When True, visualize the response(s) with plot_grid. Raw responses are
-        scaled together to ARC values 0..9 only for display. Returned arrays
-        are never quantized or modified.
+    Example for kernel [0, 1, 1]:
+        two full-intensity selected pixels -> 1 + 1 = 2 -> clipped to 1.
 
     Returns
     -------
-    dict[str, np.ndarray] | np.ndarray
-        "all" returns every named HxW response in a dict.
-        A single named/custom kernel returns one HxW floating response map.
+    kernel="all":
+        dict[kernel_name][color] -> HxW intensity map
 
-    Notes
-    -----
-    For every selected neighboring offset j, the scalar response is:
-
-        mean_j( |x_center - x_neighbor_j| )
-
-    weighted by the absolute kernel values.
-
-    For HxWxC tensors, each vector difference is additionally averaged over C.
-
-    The self-only kernel has no neighbor to compare against, so it returns the
-    absolute magnitude of the current pixel (mean absolute magnitude for HxWxC).
+    one kernel:
+        dict[color] -> HxW intensity map
     """
-    array = _validate_matrix(matrix)
+    channels = _resolve_color_channels(matrix)
 
     if isinstance(kernel, str):
         if kernel == "all":
             responses = {
-                name: _abs_kernel_response(array, _normalize_kernel(mask))
+                name: _evaluate_kernel(channels, _normalize_kernel(mask))
                 for name, mask in DEFAULT_ABS_KERNELS.items()
             }
             if plot:
-                _plot_responses(responses)
+                _plot_all_responses(responses)
             return responses
 
         try:
@@ -298,16 +241,12 @@ def survey_abs_kernels(
                 f"Unknown kernel name {kernel!r}. Available: {choices}."
             ) from exc
 
-        response = _abs_kernel_response(
-            array,
-            _normalize_kernel(selected_kernel),
-        )
+        responses = _evaluate_kernel(channels, _normalize_kernel(selected_kernel))
         if plot:
-            _plot_responses({kernel: response})
-        return response
+            _plot_color_responses(responses, kernel_name=kernel)
+        return responses
 
-    selected_kernel = _normalize_kernel(kernel)
-    response = _abs_kernel_response(array, selected_kernel)
+    responses = _evaluate_kernel(channels, _normalize_kernel(kernel))
     if plot:
-        _plot_responses({"custom": response})
-    return response
+        _plot_color_responses(responses, kernel_name="custom")
+    return responses
