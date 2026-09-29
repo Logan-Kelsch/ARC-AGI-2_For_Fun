@@ -55,3 +55,61 @@ def grid_dissection(grid: np.ndarray | Sequence[Sequence[int]]) -> np.ndarray:
     result[1] = color_info
 
     return result
+
+import numpy as np
+
+def reconstruct_grid(dissection_or_colors, presence=None):
+    """
+    Reconstruct a categorical ARC grid from any of:
+
+    1. Full grid_dissection output:
+        reconstruct_grid(dissection)
+
+    2. The second item from grid_dissection:
+        reconstruct_grid(dissection[1])
+
+    3. Colors + respective boolean presence matrices:
+        reconstruct_grid(colors, presence)
+    """
+
+    def is_color_info(x):
+        try:
+            return (
+                len(x) == 2
+                and np.asarray(x[0]).ndim == 1
+                and np.asarray(x[1]).ndim == 3
+            )
+        except (TypeError, IndexError):
+            return False
+
+    # Case 3: colors and presence supplied separately
+    if presence is not None:
+        colors = np.asarray(dissection_or_colors)
+        presence = np.asarray(presence, dtype=bool)
+
+    # Case 2: dissection[1]
+    elif is_color_info(dissection_or_colors):
+        colors = np.asarray(dissection_or_colors[0])
+        presence = np.asarray(dissection_or_colors[1], dtype=bool)
+
+    # Case 1: full dissection
+    elif (
+        len(dissection_or_colors) == 2
+        and is_color_info(dissection_or_colors[1])
+    ):
+        colors = np.asarray(dissection_or_colors[1][0])
+        presence = np.asarray(dissection_or_colors[1][1], dtype=bool)
+
+    else:
+        raise ValueError("Could not interpret reconstruction input.")
+
+    if len(colors) != presence.shape[0]:
+        raise ValueError("Each color must have one corresponding presence matrix.")
+
+    # Every cell should belong to exactly one categorical color.
+    if not np.all(presence.sum(axis=0) == 1):
+        raise ValueError("Every pixel must belong to exactly one color.")
+
+    return (
+        presence * colors[:, None, None]
+    ).sum(axis=0).astype(int)

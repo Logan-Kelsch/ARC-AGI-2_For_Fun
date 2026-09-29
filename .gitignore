@@ -8,3 +8,5 @@ data/
 results/
 notebooks/submission.ipynb
 .DS_Store
+environment_files/
+vendor/
