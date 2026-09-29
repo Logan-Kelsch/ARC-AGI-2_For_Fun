@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 
 @dataclass
-class Input_Set:
+class GP_Set:
     input: np.ndarray
     output: np.ndarray 
     data: np.ndarray      # dtype=object
@@ -33,7 +33,7 @@ def init_gp_mat(grid_set):
     #we can rate risk of error by quantifying specificity/particularity 
     #   of infromation used within associations
     L = len(grid_set)
-    gp_mat = Input_Set.empty(L)
+    gp_mat = GP_Set.empty(L)
     for i in range(L):
         gp_mat.input[i] = grid_set[i].input
         gp_mat.output[i] = grid_set[i].output
