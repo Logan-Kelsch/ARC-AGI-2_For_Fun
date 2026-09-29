@@ -1,4 +1,54 @@
+from dataclasses import dataclass
+import numpy as np
 
+@dataclass
+class Input_Set:
+    input: np.ndarray
+    output: np.ndarray 
+    data: np.ndarray      # dtype=object
+    op: np.ndarray        # strings
+    source: np.ndarray    # ints
+    status: np.ndarray    # strings
+
+    @classmethod
+    def empty(cls, L: int):
+        return cls(
+            input=np.empty(L, dtype=list),
+            output=np.empty(L, dtype=list),
+            data=np.full(L, np.empty(L, dtype=object), dtype=np.ndarray),
+            op=[],
+            source=[],
+            status=[],#null, unif, uniq, part
+        )
+
+    def __len__(self):
+        return len(self.data)
+
+def init_gp_mat(grid_set):
+    #we will be recieving the training grid
+    #we will resolve associations along inputs
+    #we will maybe resolve associations between outputs
+    #and we will resolve associations to explain 100% of information
+    #   of an output from an input, according to the provided data
+    #we can rate risk of error by quantifying specificity/particularity 
+    #   of infromation used within associations
+    L = len(grid_set)
+    gp_mat = Input_Set.empty(L)
+    for i in range(L):
+        gp_mat.input[i] = grid_set[i].input
+        gp_mat.output[i] = grid_set[i].output
+        gp_mat.data[i] = np.empty(0, dtype=object)
+
+
+    for i in range(len(grid_set)):
+        item = np.empty(1, dtype=object)
+        item[0] = np.asarray(grid_set[i].input)
+        gp_mat.data[i] = np.concatenate([gp_mat.data[i], item]) 
+    gp_mat.op.append('NULL')
+    gp_mat.source.append(-1)
+    gp_mat.status.append('NULL')
+
+    return gp_mat
 
 def disc_fit_v1(task_train):
     #CONCEPT ITER 3
