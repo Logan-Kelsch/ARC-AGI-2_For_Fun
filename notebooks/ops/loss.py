@@ -48,23 +48,76 @@ def _state_is_resolved(matrix: np.ndarray, state: int) -> bool:
 
 
 @dataclass
+class TransitionStateNode:
+    """One nonzero-delta source state in a transition-matrix leaf.
+
+    A node represents the state we are coming FROM. All observed targets for
+    that source are retained across the complete sample set.
+
+    solved=True means the source has exactly one observed target everywhere it
+    appears. This is functional uniformity, even when the mapping is off the
+    diagonal (for example color 1 -> color 0).
+
+    unsolved means the same source branches to more than one target.
+    """
+
+    source: int
+    target_counts: dict[int, int]
+    sample_target_counts: tuple[dict[int, int], ...]
+    labels: tuple[Any, ...] = ()
+    solution_idx: int = -1
+
+    @property
+    def targets(self) -> tuple[int, ...]:
+        return tuple(sorted(self.target_counts))
+
+    @property
+    def solved(self) -> bool:
+        return len(self.targets) == 1
+
+    @property
+    def target(self) -> int | None:
+        if not self.solved:
+            return None
+        return self.targets[0]
+
+    @property
+    def total_count(self) -> int:
+        return sum(self.target_counts.values())
+
+    @property
+    def sample_indices(self) -> tuple[int, ...]:
+        return tuple(
+            sample_idx
+            for sample_idx, counts in enumerate(self.sample_target_counts)
+            if counts
+        )
+
+    @property
+    def observed_sample_count(self) -> int:
+        return len(self.sample_indices)
+
+    def label(self, state: int) -> str:
+        if self.labels and state < len(self.labels):
+            return str(self.labels[state])
+        return str(state)
+
+
+@dataclass
 class LossNode:
     """One node in the GP loss-decomposition tree.
 
-    Leaf nodes hold transition matrices instead of scalar loss values.
+    Leaf nodes retain aggregate and per-sample transition matrices. In
+    addition, every source state with a nonzero delta is represented by a
+    TransitionStateNode in state_nodes.
 
-    For all transition matrices:
-      - rows are predicted states
-      - columns are target states
-      - diagonal entries are resolved transitions
-      - off-diagonal entries are unresolved transitions
+    state_nodes are partitioned by functional uniformity:
+      - solved_states: source maps to exactly one target across all observations
+      - unsolved_states: source maps to multiple targets
 
-    Each leaf stores both:
-      - matrix: aggregate transitions across every sample
-      - sample_matrices: one transition matrix per sample
-
-    solution_idx points to a discovered solution gene in the GP matrix.
-    -1 means that no solving gene has been assigned yet.
+    This is intentionally different from exact prediction resolution. A source
+    mapping such as 1 -> 0 can be functionally solved while the composite grid
+    is still incorrect relative to the raw input prediction.
     """
 
     name: str
@@ -75,6 +128,7 @@ class LossNode:
     predicted: Any = None
     target: Any = None
     labels: tuple[Any, ...] = ()
+    state_nodes: tuple[TransitionStateNode, ...] = ()
 
     @property
     def loss(self) -> np.ndarray | None:
@@ -105,7 +159,7 @@ class LossNode:
 
     @property
     def resolved(self) -> bool:
-        """Whether this node is resolved across every supplied sample."""
+        """Whether the current prediction exactly matches this loss branch."""
         if self.children:
             return all(child.resolved for child in self.children)
 
@@ -117,8 +171,29 @@ class LossNode:
 
         return _matrix_is_diagonal(self.matrix)
 
+    @property
+    def solved_states(self) -> tuple[TransitionStateNode, ...]:
+        return tuple(node for node in self.state_nodes if node.solved)
+
+    @property
+    def unsolved_states(self) -> tuple[TransitionStateNode, ...]:
+        return tuple(node for node in self.state_nodes if not node.solved)
+
+    @property
+    def nonzero_delta_resolved(self) -> bool:
+        """Whether every represented nonzero-delta source is deterministic."""
+        return bool(self.state_nodes) and not self.unsolved_states
+
+    def source_state(self, source: int) -> TransitionStateNode:
+        for node in self.state_nodes:
+            if node.source == source:
+                return node
+        raise KeyError(
+            f"No nonzero-delta source state {source} in node {self.name!r}."
+        )
+
     def find(self, name: str) -> "LossNode":
-        """Find a uniquely named node anywhere below this node."""
+        """Find a uniquely named structural loss node."""
         if self.name == name:
             return self
 
@@ -131,7 +206,7 @@ class LossNode:
         raise KeyError(f"No loss node named {name!r}.")
 
     def walk(self) -> Iterable["LossNode"]:
-        """Depth-first traversal including this node."""
+        """Depth-first traversal of structural loss nodes."""
         yield self
         for child in self.children:
             yield from child.walk()
@@ -150,7 +225,7 @@ class LossNode:
         *,
         sample_idx: int | None = None,
     ) -> str:
-        """Return unused, resolved, or degenerate for one transition state."""
+        """Classify a FROM state as unused, identity, solved, or unsolved."""
         if self.matrix is None:
             raise ValueError(
                 f"Node {self.name!r} does not contain a transition matrix."
@@ -167,13 +242,19 @@ class LossNode:
                 f"State {state} is outside matrix bounds {matrix.shape}."
             )
 
-        if not _state_is_used(matrix, state):
+        row = matrix[state, :]
+        targets = np.flatnonzero(row)
+
+        if len(targets) == 0:
             return "unused"
 
-        if _state_is_resolved(matrix, state):
-            return "resolved"
+        if len(targets) == 1 and int(targets[0]) == state:
+            return "identity"
 
-        return "degenerate"
+        if len(targets) == 1:
+            return "solved"
+
+        return "unsolved"
 
     def state_resolved(
         self,
@@ -181,11 +262,11 @@ class LossNode:
         *,
         sample_idx: int | None = None,
     ) -> bool:
-        """True when a used state has no off-diagonal transitions."""
+        """True when a FROM state has one deterministic observed target."""
         return self.state_status(
             state,
             sample_idx=sample_idx,
-        ) == "resolved"
+        ) in {"identity", "solved"}
 
     def degeneracies(
         self,
@@ -193,11 +274,11 @@ class LossNode:
         *,
         sample_idx: int | None = None,
     ) -> list[tuple[int, int, int]]:
-        """Return non-diagonal transitions as source, target, count tuples.
+        """Return non-diagonal transitions grouped strictly by FROM state.
 
-        If state is supplied, transitions are returned when that state appears
-        on either side of the transition. This means a bad 3 -> 7 transition
-        marks both state 3 and state 7 as degenerate.
+        If state is supplied, only transitions whose source equals that state
+        are returned. Target states are never treated as separate degeneracy
+        nodes.
         """
         if self.matrix is None:
             raise ValueError(
@@ -219,7 +300,7 @@ class LossNode:
             if source == target:
                 continue
 
-            if state is not None and state not in {source, target}:
+            if state is not None and source != state:
                 continue
 
             transitions.append(
@@ -227,6 +308,52 @@ class LossNode:
             )
 
         return transitions
+
+
+def _row_target_counts(
+    matrix: np.ndarray,
+    source: int,
+) -> dict[int, int]:
+    row = np.asarray(matrix)[source, :]
+    return {
+        int(target): int(row[target])
+        for target in np.flatnonzero(row)
+    }
+
+
+def _build_transition_state_nodes(
+    matrix: np.ndarray,
+    sample_matrices: tuple[np.ndarray, ...],
+    labels: tuple[Any, ...],
+) -> tuple[TransitionStateNode, ...]:
+    """Build nodes only for FROM states containing a nonzero delta."""
+    nodes: list[TransitionStateNode] = []
+
+    for source in range(matrix.shape[0]):
+        target_counts = _row_target_counts(matrix, source)
+
+        has_nonzero_delta = any(
+            target != source
+            for target in target_counts
+        )
+        if not has_nonzero_delta:
+            continue
+
+        sample_target_counts = tuple(
+            _row_target_counts(sample_matrix, source)
+            for sample_matrix in sample_matrices
+        )
+
+        nodes.append(
+            TransitionStateNode(
+                source=source,
+                target_counts=target_counts,
+                sample_target_counts=sample_target_counts,
+                labels=labels,
+            )
+        )
+
+    return tuple(nodes)
 
 
 @dataclass
@@ -569,6 +696,11 @@ def loss_resolution(
         predicted=predicted_h,
         target=target_h,
         labels=DIMENSION_LABELS,
+        state_nodes=_build_transition_state_nodes(
+            _aggregate_matrices(h_sample_matrices),
+            h_sample_matrices,
+            DIMENSION_LABELS,
+        ),
     )
     w_node = LossNode(
         name="w",
@@ -577,6 +709,11 @@ def loss_resolution(
         predicted=predicted_w,
         target=target_w,
         labels=DIMENSION_LABELS,
+        state_nodes=_build_transition_state_nodes(
+            _aggregate_matrices(w_sample_matrices),
+            w_sample_matrices,
+            DIMENSION_LABELS,
+        ),
     )
 
     shape_node = LossNode(
@@ -593,6 +730,11 @@ def loss_resolution(
         predicted=predicted_samples,
         target=target_samples,
         labels=TRANSITION_LABELS,
+        state_nodes=_build_transition_state_nodes(
+            _aggregate_matrices(composite_sample_matrices),
+            composite_sample_matrices,
+            TRANSITION_LABELS,
+        ),
     )
 
     root = LossNode(
