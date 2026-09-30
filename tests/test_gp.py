@@ -7,6 +7,8 @@ from notebooks.ops.GP import (
     GP_EvalNode,
     GP_EvalTree,
     GP_Set,
+    get_essential_gidx,
+    get_essential_gidx_tree,
     gp_fill_status,
     init_gp_eval_tree,
     init_gp_mat,
@@ -564,3 +566,172 @@ def test_pool_targets_are_initialized_as_independent_copies():
         tree.color_id.remaining_target[0],
         np.array([9, 1]),
     )
+
+
+
+def _essential_gp_set(source):
+    gene_count = len(source)
+
+    data = np.empty(1, dtype=object)
+    genes = np.empty(gene_count, dtype=object)
+    for gene_idx in range(gene_count):
+        genes[gene_idx] = gene_idx
+    data[0] = genes
+
+    gp_set = GP_Set(
+        input=np.empty(1, dtype=object),
+        output=np.empty(1, dtype=object),
+        data=data,
+        op=[f"op_{i}" for i in range(gene_count)],
+        source=list(source),
+        status=["NULL"] * gene_count,
+        eval_tree=init_gp_eval_tree([np.array([[0]])]),
+    )
+    return gp_set
+
+
+def test_get_essential_gidx_returns_solution_genes_in_discovery_order():
+    gp_set = _essential_gp_set(
+        [
+            -1,
+            0,
+            0,
+            1,
+            2,
+            3,
+        ]
+    )
+
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=5)
+    gp_set.eval_tree.mark_terminal_solution("composite", gene_idx=3)
+
+    assert get_essential_gidx(gp_set) == [5, 3]
+    assert gp_set.get_essential_gidx() == [5, 3]
+
+
+def test_get_essential_gidx_deduplicates_gene_reused_by_multiple_solutions():
+    gp_set = _essential_gp_set([-1, 0, 1])
+
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=2)
+    gp_set.eval_tree.mark_terminal_solution("composite", gene_idx=2)
+
+    assert get_essential_gidx(gp_set) == [2]
+
+
+def test_get_essential_gidx_returns_empty_when_no_solution_is_recorded():
+    gp_set = _essential_gp_set([-1, 0, 1])
+
+    assert get_essential_gidx(gp_set) == []
+    assert get_essential_gidx_tree(gp_set) == []
+
+
+def test_get_essential_gidx_tree_recursively_collects_scalar_sources():
+    # 4 -> 3 -> 2 -> 1 -> 0 -> -1
+    gp_set = _essential_gp_set(
+        [
+            -1,
+            0,
+            1,
+            2,
+            3,
+        ]
+    )
+
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=4)
+
+    assert get_essential_gidx_tree(gp_set) == [0, 1, 2, 3, 4]
+    assert gp_set.get_essential_gidx_tree() == [0, 1, 2, 3, 4]
+
+
+def test_get_essential_gidx_tree_expands_multi_source_gene():
+    #            ┌-> 1 -> 0
+    # 6 -> 4 -> 3
+    #  |         └-> 2 -> 0
+    #  └-> 5 -> [2, 0]
+    source = [
+        -1,       # 0 raw input
+        0,        # 1
+        0,        # 2
+        [1, 2],   # 3
+        3,        # 4
+        [2, 0],   # 5
+        [4, 5],   # 6
+    ]
+
+    gp_set = _essential_gp_set(source)
+    gp_set.eval_tree.mark_terminal_solution("composite", gene_idx=6)
+
+    assert get_essential_gidx_tree(gp_set) == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_get_essential_gidx_tree_deduplicates_shared_dependencies_across_solutions():
+    source = [
+        -1,       # 0
+        0,        # 1
+        0,        # 2
+        [1, 2],   # 3
+        3,        # 4
+        2,        # 5
+        [4, 5],   # 6
+    ]
+
+    gp_set = _essential_gp_set(source)
+
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=4)
+    gp_set.eval_tree.mark_terminal_solution("composite", gene_idx=6)
+
+    assert get_essential_gidx(gp_set) == [4, 6]
+    assert get_essential_gidx_tree(gp_set) == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_get_essential_gidx_tree_accepts_nested_numpy_multi_sources():
+    source = [
+        -1,
+        0,
+        0,
+        np.array([1, 2]),
+        [np.array([3]), [2]],
+    ]
+
+    gp_set = _essential_gp_set(source)
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=4)
+
+    assert get_essential_gidx_tree(gp_set) == [0, 1, 2, 3, 4]
+
+
+def test_get_essential_gidx_tree_retains_raw_input_gene_that_terminates_at_minus_one():
+    gp_set = _essential_gp_set([-1])
+
+    gp_set.eval_tree.mark_terminal_solution("root", gene_idx=0)
+
+    assert get_essential_gidx(gp_set) == [0]
+    assert get_essential_gidx_tree(gp_set) == [0]
+
+
+def test_get_essential_gidx_tree_rejects_cycle():
+    gp_set = _essential_gp_set(
+        [
+            1,
+            0,
+        ]
+    )
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=1)
+
+    with pytest.raises(ValueError, match="Cycle detected"):
+        get_essential_gidx_tree(gp_set)
+
+
+def test_get_essential_gidx_tree_rejects_missing_source_entry():
+    gp_set = _essential_gp_set([-1, 4])
+    gp_set.eval_tree.mark_terminal_solution("shape", gene_idx=1)
+
+    with pytest.raises(IndexError, match="has no matching GP_Set.source entry"):
+        get_essential_gidx_tree(gp_set)
+
+
+def test_get_essential_gidx_requires_evaluation_tree():
+    gp_set = _essential_gp_set([-1])
+    gp_set.eval_tree = None
+
+    with pytest.raises(ValueError, match="no evaluation tree"):
+        get_essential_gidx(gp_set)

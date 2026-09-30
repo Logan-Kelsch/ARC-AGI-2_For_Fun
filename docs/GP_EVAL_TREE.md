@@ -315,3 +315,105 @@ This layer only guarantees that once that function finds an exact portion of
 the output, the discovery can be retained once, numbered chronologically,
 associated with its gene index, removed from repeated search, and still coexist
 with testable parent representations.
+
+
+## Essential gene indices
+
+Once terminal solutions have been recorded, the GP_Set can report the gene
+indices that directly account for the retained output solution pieces.
+
+~~~python
+gp_mat.get_essential_gidx()
+~~~
+
+or equivalently:
+
+~~~python
+get_essential_gidx(gp_mat)
+~~~
+
+returns unique solution gene indices in discovery order.
+
+For example, if:
+
+~~~text
+solution #1 -> shape   -> gene 8
+solution #2 -> color_0 -> gene 13
+solution #3 -> subset  -> gene 8
+~~~
+
+the result is:
+
+~~~python
+[8, 13]
+~~~
+
+because the same gene only needs to be retained once.
+
+## Essential dependency tree
+
+A directly essential solution gene may depend on earlier GP genes.
+
+GP_Set.source is parallel to the gene indices:
+
+~~~text
+source[i] = -1
+    gene i has no earlier GP source dependency
+
+source[i] = 4
+    gene i was built from gene 4
+
+source[i] = [4, 7]
+    gene i required both genes 4 and 7
+~~~
+
+Multi-source entries may also be nested lists, tuples, or NumPy arrays.
+
+To recover the complete set of genes required to reconstruct all current
+solutions:
+
+~~~python
+gp_mat.get_essential_gidx_tree()
+~~~
+
+or:
+
+~~~python
+get_essential_gidx_tree(gp_mat)
+~~~
+
+The function begins with every directly essential gene and recursively follows
+source until each branch terminates at -1.
+
+For example:
+
+~~~text
+solution uses gene 6
+
+source[6] = [4, 5]
+source[4] = 3
+source[3] = [1, 2]
+source[5] = [2, 0]
+source[1] = 0
+source[2] = 0
+source[0] = -1
+~~~
+
+returns:
+
+~~~python
+[0, 1, 2, 3, 4, 5, 6]
+~~~
+
+The result is:
+
+- unique;
+- dependency-complete;
+- ordered so dependencies appear before genes that use them;
+- shared dependencies are included only once.
+
+This list is intended to become the index basis for reconstructing a minimal
+GP_Set/program containing only the genes needed by the retained solutions.
+
+Cycles and references to nonexistent source indices raise errors rather than
+silently producing an invalid reconstruction.
