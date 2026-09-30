@@ -11,11 +11,7 @@ root
 └── composite
 ~~~
 
-Every node has a solution_idx field. It defaults to -1, meaning no gene in
-the GP matrix has yet been identified as the solution for that node.
-
-The evaluator accepts either one prediction/target pair or multiple samples at
-once. The current GP matrix can therefore be inspected directly:
+The evaluator accepts one prediction/target pair or many samples at once:
 
 ~~~python
 gp_mat = init_gp_mat(task.train)
@@ -24,118 +20,150 @@ tree = loss_resolution(gp_mat.input, gp_mat.output)
 
 ## Transition convention
 
-All leaf transition matrices use the same orientation:
+Every leaf transition matrix uses:
 
 ~~~text
-rows    = predicted state
+rows    = predicted/source state
 columns = target state
 ~~~
 
-Diagonal entries are resolved transitions. Any off-diagonal entry is an
-unresolved transition.
+The aggregate matrix contains all samples and sample_matrices keeps one matrix
+per demonstration.
 
-Every leaf stores:
+## Source-state loss nodes
 
-~~~text
-matrix             aggregate transitions across all samples
-sample_matrices    one transition matrix per sample
-~~~
+The loss tree now interprets each nonzero delta by the state it is coming FROM.
 
-This preserves both the task-wide overlap and the exact demonstration in which
-a degeneracy occurs.
-
-## Shape
-
-Shape is fully decomposed into separate h and w leaves.
-
-Each dimension has a transition matrix indexed directly by dimension value.
 For example:
 
 ~~~text
-h.matrix[3, 3] += 1    predicted height 3 and target height 3
-h.matrix[3, 5] += 1    predicted height 3 but target height 5
+1 -> 0
 ~~~
 
-The h node is resolved only when every height transition across every sample is
-diagonal. The same rule applies independently to w.
+is represented once as source state 1. Target state 0 does not receive a
+duplicate node merely because a transition enters it.
 
-Per-sample shape matrices are available as:
-
-~~~python
-tree.h.sample_matrices[i]
-tree.w.sample_matrices[i]
-~~~
-
-## Composite categorical error
-
-The composite node contains an 11x11 categorical transition matrix.
-
-States 0..9 correspond to ARC colors. State 10 is INVALID.
-
-For an ordinary overlapping pixel:
+Each nonzero-delta source becomes a TransitionStateNode with:
 
 ~~~text
-matrix[predicted_color, target_color] += 1
+source
+target_counts
+sample_target_counts
+solution_idx = -1
 ~~~
 
-If the target contains a coordinate that does not exist in the prediction:
+This gives GP search a precise place to attach the gene/program that explains
+that functional mapping.
+
+Identity-only states such as 0 -> 0 are omitted from this nonzero-delta tree.
+
+## Solved vs unsolved
+
+A source-state node is solved when it has exactly one observed target across
+all occurrences in all supplied demonstrations.
+
+For example:
+
+~~~text
+sample 0: 1 -> 0 x6
+sample 1: 1 -> 0 x6
+sample 2: 1 -> 0 x5
+sample 3: 1 -> 0 x6
+sample 4: 1 -> 0 x5
+
+aggregate: 1 -> 0 x28
+~~~
+
+is solved because the functional dependency is uniform:
+
+~~~text
+1 -> 0
+~~~
+
+even though it is off-diagonal and therefore the raw input prediction is not
+yet equal to the output.
+
+A source is unsolved when the same source branches to multiple targets:
+
+~~~text
+1 -> 0 x20
+1 -> 3 x8
+~~~
+
+which means color alone is not sufficient to determine the output state.
+
+A source does not need to appear in every sample. Solved means every observed
+occurrence across the full demonstration set agrees on one target. The source
+node records exactly which samples supplied evidence.
+
+Programmatic access:
+
+~~~python
+tree.composite.solved_states
+tree.composite.unsolved_states
+
+state = tree.composite.source_state(1)
+
+state.source
+state.target_counts
+state.sample_target_counts
+state.solved
+state.target
+state.sample_indices
+state.solution_idx
+~~~
+
+## Shape
+
+Height and width remain separate nodes.
+
+Their source states are interpreted exactly like colors.
+
+For example:
+
+~~~text
+predicted H 3 -> target H 5
+predicted H 3 -> target H 5
+~~~
+
+creates a solved height source state:
+
+~~~text
+3 -> 5
+~~~
+
+while:
+
+~~~text
+3 -> 5
+3 -> 7
+~~~
+
+creates an unsolved height source state because predicted height 3 does not yet
+determine one target height.
+
+Access:
+
+~~~python
+tree.h.solved_states
+tree.h.unsolved_states
+
+tree.w.solved_states
+tree.w.unsolved_states
+~~~
+
+## Composite
+
+Composite uses ARC color states 0..9 plus INVALID at state 10.
+
+Shape mismatches therefore still appear categorically:
 
 ~~~text
 INVALID -> target_color
-~~~
-
-If the prediction contains a coordinate that does not exist in the target:
-
-~~~text
 predicted_color -> INVALID
 ~~~
 
-The aggregate matrix is:
-
-~~~python
-tree.composite.matrix
-~~~
-
-A specific sample is:
-
-~~~python
-tree.composite.sample_matrices[i]
-~~~
-
-A completely resolved composite node contains no off-diagonal transitions in
-any sample.
-
-## Per-color resolution
-
-A color is considered resolved only when no off-diagonal transition involving
-that color exists on either side of the transition.
-
-For example, both of these make color 3 unresolved:
-
-~~~text
-3 -> 7
-2 -> 3
-~~~
-
-This prevents a color from being marked solved merely because its own predicted
-row is clean while another color is incorrectly transitioning into it.
-
-Useful checks:
-
-~~~python
-tree.composite.state_status(3)
-tree.composite.state_status(3, sample_idx=1)
-tree.composite.degeneracies(3)
-tree.composite.degeneracies(3, sample_idx=1)
-~~~
-
-state_status returns one of:
-
-~~~text
-unused
-resolved
-degenerate
-~~~
+The same source-state uniformity rules apply to INVALID.
 
 ## Inspection
 
@@ -143,32 +171,54 @@ degenerate
 inspect_loss(tree)
 ~~~
 
-prints a readable task-wide view.
+prints the nonzero-delta tree partitioned into solved and unsolved mappings.
 
-Resolved components receive a check mark. Every unresolved dimension, color,
-or INVALID state receives X, followed by aggregate and sample-specific
-off-diagonal transitions.
-
-## Resolution
-
-The full task is solved only when:
+Conceptually:
 
 ~~~text
-h resolved across every sample
-AND
-w resolved across every sample
-AND
-composite resolved across every sample
+X root
+├── shape
+│   ├── h
+│   │   ├── solved
+│   │   └── unsolved
+│   └── w
+│       ├── solved
+│       └── unsolved
+└── composite
+    ├── solved
+    │   └── ✓ 1 -> 0 x28
+    └── unsolved
+        └── X 2 -> {3 x12, 4 x5}
 ~~~
 
-No total scalar loss is calculated.
+With show_samples=True, each represented source also shows its observed
+sample-specific transitions.
 
-When GP search discovers a gene that resolves a node:
+## Two meanings of resolution
+
+The system intentionally distinguishes two ideas.
+
+Exact output resolution asks whether the current predicted grids exactly equal
+the outputs. This is still represented by:
 
 ~~~python
-tree.h.solution_idx = gene_idx
-tree.composite.solution_idx = gene_idx
+tree.resolved
+tree.shape.resolved
+tree.composite.resolved
 ~~~
 
-This keeps search bookkeeping attached directly to the loss location that the
-gene solves.
+Functional source resolution asks whether a nonzero-delta source already has a
+uniform mapping that GP can model.
+
+This is represented by:
+
+~~~python
+state.solved
+tree.composite.solved_states
+tree.composite.unsolved_states
+~~~
+
+Therefore an off-diagonal mapping such as 1 -> 0 can be functionally solved
+while tree.composite.resolved remains False.
+
+No scalar total loss is calculated.
