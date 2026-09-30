@@ -419,45 +419,54 @@ class LossTree:
         return self.root.resolved
 
     def summary(self) -> dict[str, Any]:
-        """Inspectable representation for notebooks and debugging."""
+        """Inspectable representation including source-state partitions."""
+
+        def state_summary(node: TransitionStateNode) -> dict[str, Any]:
+            return {
+                "source": node.source,
+                "target_counts": dict(node.target_counts),
+                "sample_target_counts": tuple(
+                    dict(counts)
+                    for counts in node.sample_target_counts
+                ),
+                "solved": node.solved,
+                "target": node.target,
+                "solution_idx": node.solution_idx,
+            }
+
+        def leaf_summary(node: LossNode) -> dict[str, Any]:
+            return {
+                "resolved": node.resolved,
+                "predicted": np.asarray(node.predicted, dtype=object).copy(),
+                "target": np.asarray(node.target, dtype=object).copy(),
+                "transition_matrix": node.matrix.copy(),
+                "sample_transition_matrices": tuple(
+                    matrix.copy()
+                    for matrix in node.sample_matrices
+                ),
+                "solved_states": tuple(
+                    state_summary(state)
+                    for state in node.solved_states
+                ),
+                "unsolved_states": tuple(
+                    state_summary(state)
+                    for state in node.unsolved_states
+                ),
+                "solution_idx": node.solution_idx,
+            }
+
         return {
             "sample_count": self.sample_count,
             "resolved": self.resolved,
             "shape": {
                 "resolved": self.shape.resolved,
                 "solution_idx": self.shape.solution_idx,
-                "h": {
-                    "resolved": self.h.resolved,
-                    "predicted": np.asarray(self.h.predicted).copy(),
-                    "target": np.asarray(self.h.target).copy(),
-                    "transition_matrix": self.h.matrix.copy(),
-                    "sample_transition_matrices": tuple(
-                        matrix.copy()
-                        for matrix in self.h.sample_matrices
-                    ),
-                    "solution_idx": self.h.solution_idx,
-                },
-                "w": {
-                    "resolved": self.w.resolved,
-                    "predicted": np.asarray(self.w.predicted).copy(),
-                    "target": np.asarray(self.w.target).copy(),
-                    "transition_matrix": self.w.matrix.copy(),
-                    "sample_transition_matrices": tuple(
-                        matrix.copy()
-                        for matrix in self.w.sample_matrices
-                    ),
-                    "solution_idx": self.w.solution_idx,
-                },
+                "h": leaf_summary(self.h),
+                "w": leaf_summary(self.w),
             },
             "composite": {
-                "resolved": self.composite.resolved,
-                "transition_matrix": self.composite.matrix.copy(),
-                "sample_transition_matrices": tuple(
-                    matrix.copy()
-                    for matrix in self.composite.sample_matrices
-                ),
+                **leaf_summary(self.composite),
                 "labels": TRANSITION_LABELS,
-                "solution_idx": self.composite.solution_idx,
             },
             "root_solution_idx": self.root.solution_idx,
         }
@@ -753,14 +762,34 @@ def _transition_label(node: LossNode, state: int) -> str:
     return str(state)
 
 
-def _format_degeneracies(
-    node: LossNode,
-    transitions: list[tuple[int, int, int]],
+def _format_target_counts(
+    state_node: TransitionStateNode,
+    counts: dict[int, int] | None = None,
 ) -> str:
-    return ", ".join(
-        f"{_transition_label(node, source)} -> "
-        f"{_transition_label(node, target)} x{count}"
-        for source, target, count in transitions
+    counts = state_node.target_counts if counts is None else counts
+
+    if not counts:
+        return "not observed"
+
+    parts = [
+        f"{state_node.label(target)} x{count}"
+        for target, count in sorted(counts.items())
+    ]
+
+    if len(parts) == 1:
+        return parts[0]
+
+    return "{" + ", ".join(parts) + "}"
+
+
+def _format_source_mapping(
+    state_node: TransitionStateNode,
+    counts: dict[int, int] | None = None,
+) -> str:
+    counts = state_node.target_counts if counts is None else counts
+    return (
+        f"{state_node.label(state_node.source)} -> "
+        f"{_format_target_counts(state_node, counts)}"
     )
 
 
@@ -770,10 +799,21 @@ def inspect_loss(
     show_samples: bool = True,
     show_unused_colors: bool = False,
 ) -> str:
-    """Print and return a readable multi-sample loss-tree inspection.
+    """Print source-state functional partitions for the loss tree.
 
-    Every unresolved dimension, color, and INVALID state is marked with X.
-    Sample-specific degeneracies are shown beneath the affected node/state.
+    Only source states with a nonzero delta are represented beneath h, w, and
+    composite. Each source state appears exactly once.
+
+    solved:
+        The source maps to exactly one target across every observed occurrence
+        in the supplied samples. The mapping may be off-diagonal.
+
+    unsolved:
+        The same source maps to multiple target states.
+
+    show_unused_colors remains accepted for notebook compatibility, but identity
+    and unused color states are intentionally omitted from the nonzero-delta
+    tree.
     """
     if not isinstance(tree, LossTree):
         raise TypeError("inspect_loss expects a LossTree.")
@@ -784,102 +824,86 @@ def inspect_loss(
     def marker(resolved: bool) -> str:
         return check if resolved else cross
 
+    def append_state_partition(
+        lines: list[str],
+        node: LossNode,
+        *,
+        prefix: str,
+    ) -> None:
+        solved = node.solved_states
+        unsolved = node.unsolved_states
+
+        lines.append(f"{prefix}├── solved ({len(solved)})")
+        if not solved:
+            lines.append(f"{prefix}│   └── none")
+        else:
+            for idx, state_node in enumerate(solved):
+                state_branch = "└──" if idx == len(solved) - 1 else "├──"
+                sample_prefix = (
+                    f"{prefix}│       "
+                    if idx == len(solved) - 1
+                    else f"{prefix}│   │   "
+                )
+
+                lines.append(
+                    f"{prefix}│   {state_branch} {check} "
+                    f"{_format_source_mapping(state_node)} | "
+                    f"observed {state_node.observed_sample_count}/"
+                    f"{tree.sample_count} samples | "
+                    f"solution_idx={state_node.solution_idx}"
+                )
+
+                if show_samples:
+                    for sample_idx in state_node.sample_indices:
+                        counts = state_node.sample_target_counts[sample_idx]
+                        lines.append(
+                            f"{sample_prefix}sample {sample_idx}: "
+                            f"{_format_source_mapping(state_node, counts)}"
+                        )
+
+        lines.append(f"{prefix}└── unsolved ({len(unsolved)})")
+        if not unsolved:
+            lines.append(f"{prefix}    └── none")
+        else:
+            for idx, state_node in enumerate(unsolved):
+                state_branch = "└──" if idx == len(unsolved) - 1 else "├──"
+                sample_prefix = (
+                    f"{prefix}        "
+                    if idx == len(unsolved) - 1
+                    else f"{prefix}    │   "
+                )
+
+                lines.append(
+                    f"{prefix}    {state_branch} {cross} "
+                    f"{_format_source_mapping(state_node)} | "
+                    f"observed {state_node.observed_sample_count}/"
+                    f"{tree.sample_count} samples | "
+                    f"solution_idx={state_node.solution_idx}"
+                )
+
+                if show_samples:
+                    for sample_idx in state_node.sample_indices:
+                        counts = state_node.sample_target_counts[sample_idx]
+                        lines.append(
+                            f"{sample_prefix}sample {sample_idx}: "
+                            f"{_format_source_mapping(state_node, counts)}"
+                        )
+
     lines = [
         f"{marker(tree.resolved)} root | {tree.sample_count} sample(s)",
         f"├── {marker(tree.shape.resolved)} shape",
+        f"│   ├── {marker(tree.h.resolved)} h",
     ]
 
-    for position, node in enumerate((tree.h, tree.w)):
-        last = position == 1
-        branch = "│   └──" if last else "│   ├──"
-        continuation = "│       " if last else "│   │   "
+    append_state_partition(lines, tree.h, prefix="│   │   ")
 
-        lines.append(
-            f"{branch} {marker(node.resolved)} {node.name} | "
-            f"{node.resolved_sample_count}/{tree.sample_count} samples resolved"
-        )
+    lines.append(f"│   └── {marker(tree.w.resolved)} w")
+    append_state_partition(lines, tree.w, prefix="│       ")
 
-        aggregate_transitions = node.degeneracies()
-        if aggregate_transitions:
-            lines.append(
-                f"{continuation}X aggregate: "
-                f"{_format_degeneracies(node, aggregate_transitions)}"
-            )
-
-        if show_samples:
-            for sample_idx, is_resolved in enumerate(node.sample_resolved):
-                if is_resolved:
-                    continue
-
-                sample_transitions = node.degeneracies(
-                    sample_idx=sample_idx
-                )
-                lines.append(
-                    f"{continuation}X sample {sample_idx}: "
-                    f"{_format_degeneracies(node, sample_transitions)}"
-                )
-
-    composite = tree.composite
     lines.append(
-        f"└── {marker(composite.resolved)} composite | "
-        f"{composite.resolved_sample_count}/{tree.sample_count} "
-        "samples resolved"
+        f"└── {marker(tree.composite.resolved)} composite"
     )
-
-    color_states = list(range(ARC_COLOR_COUNT))
-    if (
-        _state_is_used(composite.matrix, INVALID_STATE)
-        or show_unused_colors
-    ):
-        color_states.append(INVALID_STATE)
-
-    for state in color_states:
-        status = composite.state_status(state)
-
-        if status == "unused" and not show_unused_colors:
-            continue
-
-        label = _transition_label(composite, state)
-
-        if status == "unused":
-            lines.append(f"    ├── - {label} | unused")
-            continue
-
-        state_ok = status == "resolved"
-        lines.append(
-            f"    ├── {marker(state_ok)} {label}"
-        )
-
-        if not state_ok:
-            aggregate_transitions = composite.degeneracies(state)
-            lines.append(
-                "    │   X aggregate: "
-                + _format_degeneracies(
-                    composite,
-                    aggregate_transitions,
-                )
-            )
-
-            if show_samples:
-                for sample_idx in range(tree.sample_count):
-                    sample_status = composite.state_status(
-                        state,
-                        sample_idx=sample_idx,
-                    )
-                    if sample_status != "degenerate":
-                        continue
-
-                    sample_transitions = composite.degeneracies(
-                        state,
-                        sample_idx=sample_idx,
-                    )
-                    lines.append(
-                        f"    │   X sample {sample_idx}: "
-                        + _format_degeneracies(
-                            composite,
-                            sample_transitions,
-                        )
-                    )
+    append_state_partition(lines, tree.composite, prefix="    ")
 
     report = "\n".join(lines)
     print(report)
