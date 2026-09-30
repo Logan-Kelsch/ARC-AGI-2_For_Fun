@@ -5,7 +5,7 @@ from collections.abc import Sequence
 import numpy as np
 
 
-def grid_dissection(grid: np.ndarray | Sequence[Sequence[int]]) -> np.ndarray:
+def grid_dissection(grid: np.ndarray | Sequence[Sequence[int]], as_seperate:bool=False) -> np.ndarray:
     """Dissect a 2D categorical grid into shape, colors, and per-color presence.
 
     Returns
@@ -54,7 +54,10 @@ def grid_dissection(grid: np.ndarray | Sequence[Sequence[int]]) -> np.ndarray:
     result[0] = shape
     result[1] = color_info
 
-    return result
+    if(as_seperate):
+        return result[0], color_info[0], color_info[1]
+    else:
+        return result
 
 import numpy as np
 

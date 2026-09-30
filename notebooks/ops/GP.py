@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import ops.grid_ops as grid_ops
 import numpy as np
 
 @dataclass
@@ -41,12 +42,28 @@ def init_gp_mat(grid_set):
 
 
     for i in range(len(grid_set)):
-        item = np.empty(1, dtype=object)
+        item = np.empty(4, dtype=object)
         item[0] = np.asarray(grid_set[i].input)
+        item[1], item[2], item[3] = grid_ops.grid_dissection(grid_set[i].input, as_seperate=True)
         gp_mat.data[i] = np.concatenate([gp_mat.data[i], item]) 
+    #NOTE temp solutions for initial stats
+    #identity composite
     gp_mat.op.append('NULL')
     gp_mat.source.append(-1)
     gp_mat.status.append('NULL')
+    #identity shape
+    gp_mat.op.append('shape extract')
+    gp_mat.source.append(0)
+    gp_mat.status.append('NULL')
+    #identity colors used (color ID)
+    gp_mat.op.append('color ID - partition')
+    gp_mat.source.append(0)
+    gp_mat.status.append('NULL')
+    #identity colors used (boolean presence)
+    gp_mat.op.append('color presence - partition')
+    gp_mat.source.append(0)
+    gp_mat.status.append('NULL')
+    
 
     return gp_mat
 
@@ -242,6 +259,3 @@ def test_uniformity():
     pass
     
 
-def grid_dissection(grid):
-    
-    pass
