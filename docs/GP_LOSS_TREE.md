@@ -1,7 +1,10 @@
 # GP loss tree
 
-The GP loss system represents prediction error as a fixed decomposition tree
-rather than collapsing all error into one scalar.
+The loss tree is a descriptive view of how current prediction states transition
+to target states across the training demonstrations.
+
+It does **not** decide whether the GP system has found a solution. That decision
+belongs in a separate GP evaluation layer.
 
 ~~~text
 root
@@ -11,7 +14,7 @@ root
 └── composite
 ~~~
 
-The evaluator accepts one prediction/target pair or many samples at once:
+The evaluator accepts one prediction/target pair or multiple samples:
 
 ~~~python
 gp_mat = init_gp_mat(task.train)
@@ -27,12 +30,13 @@ rows    = predicted/source state
 columns = target state
 ~~~
 
-The aggregate matrix contains all samples and sample_matrices keeps one matrix
-per demonstration.
+The aggregate matrix contains all supplied samples and sample_matrices preserves
+one matrix per demonstration.
 
-## Source-state loss nodes
+## Source-state nodes
 
-The loss tree now interprets each nonzero delta by the state it is coming FROM.
+Only source states containing a nonzero delta are represented beneath h, w, or
+composite.
 
 For example:
 
@@ -40,27 +44,33 @@ For example:
 1 -> 0
 ~~~
 
-is represented once as source state 1. Target state 0 does not receive a
-duplicate node merely because a transition enters it.
+is represented once under source state 1.
 
-Each nonzero-delta source becomes a TransitionStateNode with:
+Target state 0 does not receive a duplicate node simply because a transition
+enters it.
+
+Each TransitionStateNode contains:
 
 ~~~text
 source
 target_counts
 sample_target_counts
-solution_idx = -1
+uniform
+target
+sample_indices
+solution_idx
 ~~~
 
-This gives GP search a precise place to attach the gene/program that explains
-that functional mapping.
+Identity-only states such as 0 -> 0 are omitted from the nonzero-delta tree.
 
-Identity-only states such as 0 -> 0 are omitted from this nonzero-delta tree.
+## Meaning of ✓ and X
 
-## Solved vs unsolved
+The loss tree uses only structural checks.
 
-A source-state node is solved when it has exactly one observed target across
-all occurrences in all supplied demonstrations.
+~~~text
+✓  source has exactly one observed target
+X  source branches to more than one observed target
+~~~
 
 For example:
 
@@ -70,44 +80,43 @@ sample 1: 1 -> 0 x6
 sample 2: 1 -> 0 x5
 sample 3: 1 -> 0 x6
 sample 4: 1 -> 0 x5
-
-aggregate: 1 -> 0 x28
 ~~~
 
-is solved because the functional dependency is uniform:
+produces:
 
 ~~~text
-1 -> 0
+✓ 1 -> 0 x28
 ~~~
 
-even though it is off-diagonal and therefore the raw input prediction is not
-yet equal to the output.
+because every observed occurrence of source state 1 maps to the same target.
 
-A source is unsolved when the same source branches to multiple targets:
+By contrast:
 
 ~~~text
 1 -> 0 x20
 1 -> 3 x8
 ~~~
 
-which means color alone is not sufficient to determine the output state.
+produces:
 
-A source does not need to appear in every sample. Solved means every observed
-occurrence across the full demonstration set agrees on one target. The source
-node records exactly which samples supplied evidence.
+~~~text
+X 1 -> {0 x20, 3 x8}
+~~~
+
+because source state 1 is not functionally uniform.
+
+A source does not need to appear in every sample. The check describes all
+observed occurrences across the supplied demonstrations.
 
 Programmatic access:
 
 ~~~python
-tree.composite.solved_states
-tree.composite.unsolved_states
-
 state = tree.composite.source_state(1)
 
 state.source
 state.target_counts
 state.sample_target_counts
-state.solved
+state.uniform
 state.target
 state.sample_indices
 state.solution_idx
@@ -115,55 +124,53 @@ state.solution_idx
 
 ## Shape
 
-Height and width remain separate nodes.
+Height and width use the same source-state structure independently.
 
-Their source states are interpreted exactly like colors.
-
-For example:
+Example:
 
 ~~~text
 predicted H 3 -> target H 5
 predicted H 3 -> target H 5
 ~~~
 
-creates a solved height source state:
+becomes:
 
 ~~~text
-3 -> 5
+✓ 3 -> 5 x2
 ~~~
 
 while:
 
 ~~~text
-3 -> 5
-3 -> 7
+predicted H 3 -> target H 5
+predicted H 3 -> target H 7
 ~~~
 
-creates an unsolved height source state because predicted height 3 does not yet
-determine one target height.
+becomes:
+
+~~~text
+X 3 -> {5 x1, 7 x1}
+~~~
 
 Access:
 
 ~~~python
-tree.h.solved_states
-tree.h.unsolved_states
-
-tree.w.solved_states
-tree.w.unsolved_states
+tree.h.state_nodes
+tree.w.state_nodes
 ~~~
 
 ## Composite
 
 Composite uses ARC color states 0..9 plus INVALID at state 10.
 
-Shape mismatches therefore still appear categorically:
+Shape mismatch can therefore appear as:
 
 ~~~text
 INVALID -> target_color
 predicted_color -> INVALID
 ~~~
 
-The same source-state uniformity rules apply to INVALID.
+These are treated exactly like other source-state mappings.
 
 ## Inspection
 
@@ -171,35 +178,33 @@ The same source-state uniformity rules apply to INVALID.
 inspect_loss(tree)
 ~~~
 
-prints the nonzero-delta tree partitioned into solved and unsolved mappings.
+prints source states directly under their structural location.
 
 Conceptually:
 
 ~~~text
-X root
-├── shape
-│   ├── h
-│   │   ├── solved
-│   │   └── unsolved
-│   └── w
-│       ├── solved
-│       └── unsolved
-└── composite
-    ├── solved
-    │   └── ✓ 1 -> 0 x28
-    └── unsolved
-        └── X 2 -> {3 x12, 4 x5}
+X root | 5 sample(s)
+├── ✓ shape
+│   ├── ✓ h
+│   │   └── ✓ no nonzero delta
+│   └── ✓ w
+│       └── ✓ no nonzero delta
+└── X composite
+    ├── ✓ 1 -> 0 x28
+    └── X 2 -> {3 x12, 4 x5}
 ~~~
 
-With show_samples=True, each represented source also shows its observed
-sample-specific transitions.
+The structural parent receives ✓ only when every nonzero-delta source beneath it
+has a uniform one-target mapping. A parent receives X when at least one source
+branches.
 
-## Two meanings of resolution
+These marks do **not** mean that a GP program has been found. They describe only
+the structure already visible in the demonstrations.
 
-The system intentionally distinguishes two ideas.
+## Exact-match compatibility
 
-Exact output resolution asks whether the current predicted grids exactly equal
-the outputs. This is still represented by:
+The existing resolved properties remain available for code that needs to ask
+whether the current predicted grids exactly equal the targets:
 
 ~~~python
 tree.resolved
@@ -207,18 +212,6 @@ tree.shape.resolved
 tree.composite.resolved
 ~~~
 
-Functional source resolution asks whether a nonzero-delta source already has a
-uniform mapping that GP can model.
-
-This is represented by:
-
-~~~python
-state.solved
-tree.composite.solved_states
-tree.composite.unsolved_states
-~~~
-
-Therefore an off-diagonal mapping such as 1 -> 0 can be functionally solved
-while tree.composite.resolved remains False.
+They are separate from the ✓ / X uniformity markers used by inspect_loss.
 
 No scalar total loss is calculated.
