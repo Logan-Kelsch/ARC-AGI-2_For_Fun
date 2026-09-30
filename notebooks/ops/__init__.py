@@ -1,3 +1,18 @@
+from .environment import (
+    ProgramMeta,
+    ProgramX,
+    STNode,
+    SolutionTree,
+    init_env,
+    source_indices,
+)
+from .ops import (
+    OP_REGISTRY,
+    OperationInfo,
+    operation,
+    partition_composite,
+    partition_shape,
+)
 """Notebook-local analytical operation library."""
 
 from .alpha_ops import DEFAULT_ABS_KERNELS, survey_abs_kernels
@@ -31,6 +46,17 @@ from .loss import (
 )
 
 __all__ = [
+    "ProgramMeta",
+    "ProgramX",
+    "STNode",
+    "SolutionTree",
+    "init_env",
+    "source_indices",
+    "OP_REGISTRY",
+    "OperationInfo",
+    "operation",
+    "partition_shape",
+    "partition_composite",
     "DEFAULT_ABS_KERNELS",
     "survey_abs_kernels",
     "GP_EvalNode",

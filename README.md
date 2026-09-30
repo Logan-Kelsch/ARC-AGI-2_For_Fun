@@ -2,403 +2,302 @@
 
 An experimental **Genetic Programming / program-synthesis approach to ARC-AGI-2**.
 
-The central idea of this repository is not to directly train a model to predict an output grid. Instead, the solver incrementally builds a library of interpretable **genes** describing each training example, discovers exact relationships among those genes, and searches for small programs that progressively explain the output.
+The current architecture separates the search space over inputs from the exact partition structure of the known training outputs.
 
-This is an active research project. The architecture below describes the current working hypothesis and will change as the search process is refined.
+The five primary components are:
+
+~~~text
+GP_meta
+GP_X
+
+SP_meta
+SP_X
+
+ST
+~~~
+
+GP means Genetic Program, SP means Solution Program, and ST means Solution Tree.
+
+This is an active research project. The architecture is intentionally explicit and interpretable rather than optimized for production use.
 
 ---
 
-## Problem framing
+## Core idea
 
-An ARC task contains a small number of input/output demonstration pairs and one or more unseen test inputs.
-
-The objective is to infer a transformation:
+For every ARC training sample we know:
 
 ~~~text
 input grid -> output grid
 ~~~
 
-that exactly reproduces all demonstration outputs and then generalizes to the test input.
-
-Rather than treating this as a monolithic prediction problem, this project decomposes the problem into two interacting spaces:
+The system builds two program spaces:
 
 ~~~text
-INTERPRETATION SPACE                LOSS SPACE
+INPUT SIDE                         OUTPUT SIDE
 
-raw input                           unsolved output
-   |                                     |
-   v                                     v
-genes / attributes                  loss tree
-   |                                     |
-   v                                     v
-derived genes                       unresolved subproblems
-   |                                     |
-   +--------------- search --------------+
-                     |
-                     v
-             discovered program
+GP_meta / GP_X                     SP_meta / SP_X
+      |                                  |
+      | arbitrary GP transforms          | full-partition transforms only
+      v                                  v
+candidate interpretations          exact solution decomposition
+      |                                  |
+      +--------------- ST ---------------+
+              exact cross-sample matches
 ~~~
 
-The GP search expands the interpretation space while the loss tree tells the search **what still needs to be explained**.
+GP is the expanding interpretation/search space.
+
+SP is a complete decomposition of the observed training outputs.
+
+ST records which SP genes are already represented exactly by GP genes across all training samples.
 
 ---
 
-## 1. Gene matrix
+## GP_meta
 
-The foundational data structure is **GP_Set**, initialized with:
+GP_meta is parallel metadata for every GP gene.
+
+For gene index i:
 
 ~~~python
-gp_mat = init_gp_mat(task_train)
+GP_meta.source[i]
+GP_meta.op[i]
+GP_meta.dims[i]
 ~~~
 
-There is one row of gene data for each training example.
-
-Conceptually:
-
-~~~text
-                 gene 0      gene 1      gene 2      ...      gene G
-
-sample 0          x00         x01         x02                  x0G
-sample 1          x10         x11         x12                  x1G
-sample 2          x20         x21         x22                  x2G
-  ...
-sample L          xL0         xL1         xL2                  xLG
-~~~
-
-Each gene index represents the **same interpretation or operation across every training example**.
-
-A gene may contain almost any structured value useful for reasoning about the task:
-
-- integers or floats
-- strings
-- 1D or 2D lists
-- NumPy arrays
-- boolean masks
-- output/input dimensions
-- color sets
-- object/component descriptions
-- nested combinations of these structures
-
-The GP structure also records metadata for each gene:
-
-~~~text
-data    actual interpreted value
-op      operation that generated the gene
-source  parent/source gene
-status  relationship of this gene across training samples
-~~~
-
-The initial gene is the raw input grid. Future operations append new genes derived from existing ones.
-
----
-
-## 2. Exact equivalence across demonstrations
-
-Before reasoning about how different values relate, the system first asks a simple set-theoretic question:
-
-> For the same gene index, which training examples contain exactly equivalent values?
-
-**gp_fill_status(gp_set)** classifies unresolved genes as:
-
-~~~text
-unif   all training examples contain the same value
-uniq   every training example contains a different value
-part   some examples are identical while others differ
-~~~
-
-For example:
-
-~~~text
-[5, 5, 5] -> unif
-[5, 7, 9] -> uniq
-[5, 5, 9] -> part
-~~~
-
-This comparison is based only on **exact structural/content equality**.
-
-There is no similarity score and no attempt to quantify how different two values are.
-
-Nested lists, normal NumPy arrays, object arrays, matrices, and mixed nested structures can all participate in these equivalence tests.
-
-This creates partitions of the training examples that can later become useful evidence for deterministic relationships.
-
----
-
-## 3. Gene expansion
-
-Genetic Programming operations transform existing genes into new genes.
-
-Conceptually:
-
-~~~text
-gene_i
-   |
-   +-- operation A --> gene_j
-   |
-   +-- operation B --> gene_k
-   |
-   '-- operation C --> gene_m
-~~~
-
-Examples may eventually include operations such as:
-
-- grid dissection
-- dimensions
-- colors present
-- color removal/addition
-- masks
-- connected components
-- counts
-- bounding boxes
-- spatial transformations
-- relations between components
-- transformations between input and output attributes
-
-Each generated value is stored at the same gene index across all training examples.
-
-The important distinction is that the system is not limited to searching for **constant genes**.
-
-A useful rule may connect genes whose values vary across every demonstration.
-
-For example:
-
-~~~text
-input colors  {0, 1, 5} -> output colors {0, 5}
-input colors  {0, 1, 7} -> output colors {0, 7}
-input colors  {0, 1, 3} -> output colors {0, 3}
-~~~
-
-The raw color sets are not uniform, but the relationship
-
-~~~text
-output_colors = input_colors - {1}
-~~~
-
-is uniform.
-
-The long-term search therefore operates over both **gene values** and **relations between genes**.
-
----
-
-## 4. Loss is a tree, not a scalar
-
-The current evaluator deliberately avoids reducing output error to one number.
-
-Instead:
+describe:
 
 ~~~python
-tree = loss_resolution(yhat, y)
+GP_X[i]
 ~~~
 
-creates:
+source identifies which earlier gene or genes were used.
+
+op identifies the transformation operation.
+
+dims records the dimensionality of the instantiated gene:
 
 ~~~text
-root
-├── shape
-│   ├── h
-│   └── w
-└── composite
+0 scalar
+1 vector
+2 matrix
+3 tensor / stack of matrices
+...
 ~~~
 
-The root represents the complete ARC output problem. Its children are a full decomposition of that problem.
+---
 
-### Shape
+## GP_X
 
-Output dimensions are handled separately:
+GP_X contains the actual instantiated input-side gene values.
 
-~~~text
-shape
-├── h
-└── w
-~~~
-
-Height and width are terminal loss nodes.
-
-This makes output dimensions high-level constraints: before the exact contents of an output can be fully specified, the solver must determine the space in which those contents exist.
-
-### Composite grid loss
-
-The **composite** node represents the categorical state of every output pixel.
-
-Its value is an **11 x 11 color-transition matrix**.
-
-States:
-
-~~~text
-0..9  ARC colors
-10    INVALID
-~~~
-
-Rows represent the predicted state and columns represent the target state.
-
-For example:
+Its axes are gene-major:
 
 ~~~python
-matrix[3, 7]
+GP_X[gidx][sample_idx]
+GP_X[gidx, sample_idx]
 ~~~
 
-is the number of positions predicted as color 3 that should have been color 7.
+The same gene index means the same interpretation/operation for every training sample.
 
-A correct prediction contains transitions only on the normal color diagonal.
-
-The **INVALID** state handles shape mismatches:
-
-~~~text
-INVALID -> target color
-    target contains a pixel that does not exist in the prediction
-
-predicted color -> INVALID
-    prediction contains a pixel that does not exist in the target
-~~~
-
-This preserves categorical error information without inventing a continuous distance between ARC colors.
+Because ARC sample shapes may differ, each gene stores its samples in a 1D object array.
 
 ---
 
-## 5. Loss nodes can be solved independently
+## SP_meta and SP_X
 
-Every node in the loss tree contains:
+SP has the same metadata/data structure as GP, but is instantiated from the known output grids.
+
+The critical restriction is:
+
+> **SP may only use operations marked full_partition=True.**
+
+SP is therefore not another free-form search space. It is a lossless decomposition of the solution representation.
+
+---
+
+## ST: Solution Tree
+
+ST is derived directly from SP_meta.source.
+
+Every SP gene receives a node containing:
+
+~~~text
+sp_gidx
+op
+dims
+parents
+children
+gp_gidx
+~~~
+
+Initially:
+
+~~~text
+gp_gidx = -1
+~~~
+
+meaning no exact GP representation has yet been identified.
+
+A future evaluator will compare GP and SP genes across every training sample. When GP gene j exactly reproduces SP gene i across all samples:
 
 ~~~python
-solution_idx = -1
+ST.mark_solution(
+    sp_gidx=i,
+    gp_gidx=j,
+)
 ~~~
 
-where -1 means no gene/program has yet been identified as solving that subproblem.
+ST therefore records how much of the exact solution program is already represented inside GP.
 
-As GP search discovers explanations, nodes can point back into the gene matrix:
+---
+
+## Operations
+
+Transformation operations live in:
+
+~~~text
+notebooks/ops/ops.py
+~~~
+
+and use one interface on either side:
 
 ~~~python
-tree["shape"]["h"].solution_idx = gene_idx
-tree["shape"]["w"].solution_idx = gene_idx
-tree["composite"].solution_idx = gene_idx
+op(GP_meta, GP_X, source_idx)
+op(SP_meta, SP_X, source_idx)
 ~~~
 
-This allows the search to reason about partial progress without forcing every candidate program to solve the entire task at once.
+Each registered operation declares:
 
-For example, one gene may perfectly determine output height while providing no information about output colors. That is still useful information and should constrain the remaining search.
+~~~text
+full_partition
+output_count
+~~~
+
+GP may use any registered operation.
+
+SP calls are rejected unless the operation is full_partition.
 
 ---
 
-## 6. Estimated search process
+## Initial operations
 
-The current expected process is approximately:
+### partition_shape
 
-~~~text
-1. Load demonstration pairs
-        |
-        v
-2. Initialize GP_Set
-        |
-        v
-3. Store raw input genes
-        |
-        v
-4. Classify exact gene equivalence
-   unif / uniq / part
-        |
-        v
-5. Apply candidate operations
-        |
-        v
-6. Append derived genes
-        |
-        v
-7. Test newly created relationships
-        |
-        v
-8. Generate candidate output / output attribute
-        |
-        v
-9. Resolve hierarchical loss tree
-        |
-        v
-10. Record which genes solve which loss nodes
-        |
-        v
-11. Expand promising unresolved branches
-        |
-        v
-12. Backtrack / compose transformations
-        |
-        v
-13. Reach zero unresolved output constraints
-        |
-        v
-14. Apply discovered program to test input
+~~~python
+gidx = partition_shape(
+    meta,
+    X,
+    source_idx,
+)
 ~~~
 
-The important optimization is that the search should not blindly enumerate every possible program to full depth.
+For a 2D grid:
 
-The loss hierarchy provides a way to search toward **constraint reduction**.
+~~~text
+grid -> [height, width]
+~~~
 
-A transformation is valuable when it explains some previously unresolved portion of the output while remaining consistent across the demonstrations.
+This creates one 1D gene.
 
-The search can therefore move deeply into useful abstractions, backtrack when an interpretation stops constraining the answer, and combine independently discovered solutions.
+### partition_composite
+
+~~~python
+color_gidx, presence_gidx = partition_composite(
+    meta,
+    X,
+    source_idx,
+)
+~~~
+
+This generates two genes:
+
+~~~text
+1. sorted 1D array of colors used
+2. 3D boolean array [num_colors, height, width]
+~~~
+
+Presence channel i corresponds to color_ids[i].
+
+Both initial operations are full partitions and are therefore legal on SP.
 
 ---
 
-## 7. Genetic Programming interpretation
+## Initialization
 
-A candidate program can be viewed as a lineage through the gene matrix:
+The complete starting environment is:
 
-~~~text
-raw grid
-   |
-grid_dissection
-   |
-component extraction
-   |
-attribute selection
-   |
-transformation
-   |
-candidate output attribute
+~~~python
+GP_meta, GP_X, SP_meta, SP_X, ST = init_env(task.train)
 ~~~
 
-Each derived gene retains its generating operation and source, allowing the solver to reconstruct the program that produced it.
+Gene 0 begins as:
 
-The intended search space is therefore not just a collection of final predictions. It is a graph/tree of increasingly abstract **interpretable transformations**.
+~~~text
+GP_X[0] = input grids across training samples
+SP_X[0] = output grids across training samples
+~~~
 
-This makes GP useful here for two reasons:
+Then partition_shape and partition_composite are applied to gene 0 on both sides.
 
-1. operations can be composed into symbolic programs;
-2. the search can retain partial discoveries that solve only part of the loss tree.
+The initial program layout is:
 
-Future optimizations may include grammar restrictions, complexity penalties, equivalence pruning, partition-aware search, expected constraint gain, caching, backtracking, and stochastic/tree-search strategies.
+~~~text
+gidx   operation                source   dims
+
+0      raw_input/raw_output     -1       2
+1      partition_shape           0       1
+2      partition_composite       0       1   color IDs
+3      partition_composite       0       3   color presence
+~~~
+
+The initial SP structure produces:
+
+~~~text
+SP g0: raw_output
+├── SP g1: partition_shape
+├── SP g2: partition_composite   dims=1
+└── SP g3: partition_composite   dims=3
+~~~
+
+Every ST node begins unresolved with gp_gidx=-1.
 
 ---
 
-## 8. Definition of success
-
-For a training example, the output is solved when:
+## Expected search direction
 
 ~~~text
-height resolved
-AND
-width resolved
-AND
-composite transition matrix contains no off-diagonal error
+1. Initialize GP / SP / ST
+        |
+        v
+2. SP defines the exact output decomposition
+        |
+        v
+3. Expand GP with candidate transformation operations
+        |
+        v
+4. Compare GP genes with SP genes across all samples
+        |
+        v
+5. Mark exact matches in ST
+        |
+        v
+6. Expand GP toward unresolved SP structure
+        |
+        v
+7. Continue until the required SP representation is explained
+        |
+        v
+8. Trace GP source dependencies
+        |
+        v
+9. Reconstruct the minimal discovered program
+        |
+        v
+10. Apply it to the unseen test input
 ~~~
 
-Across the task, the desired program must reproduce **every demonstration pair exactly**.
-
-Only after the program satisfies the demonstrations is it applied to the unseen test grid.
-
-This repository intentionally distinguishes:
-
-~~~text
-finding a program that fits the examples
-~~~
-
-from:
-
-~~~text
-finding a simple/reliable program likely to generalize
-~~~
-
-The first is exact constraint satisfaction.
-
-The second is the central research problem.
+Exact matching remains categorical and structural. The system does not assume ARC colors or arbitrary symbolic states have meaningful continuous distances.
 
 ---
 
@@ -413,79 +312,39 @@ make data
 make test
 ~~~
 
-**make data** clones the official ARC-AGI-2 data into **data/ARC-AGI-2**.
+Inside a notebook:
 
-Useful commands:
+~~~python
+from notebooks.ops import init_env
 
-~~~bash
-make list-tasks SPLIT=training
-make inspect TASK=<task_id> SPLIT=training
-make evaluate
+GP_meta, GP_X, SP_meta, SP_X, ST = init_env(task.train)
 ~~~
 
 ---
 
-## Current analytical operations
-
-The experimental GP work currently lives primarily in:
+## Experimental modules
 
 ~~~text
 notebooks/ops/
-├── GP.py
+├── environment.py
+├── ops.py
+├── GP.py          legacy GP_Set architecture / reference
+├── loss.py        legacy descriptive loss work / reference
 ├── eval.py
 ├── grid_ops.py
 └── alpha_ops.py
 ~~~
 
-Important current pieces include:
+New architecture work should target environment.py, ops.py, and ST.
 
-~~~python
-init_gp_mat(...)
-gp_fill_status(...)
-grid_dissection(...)
-loss_resolution(...)
-color_transition_matrix(...)
-~~~
-
-The **src/arc_agi2_fun/** package still contains the stable task loading, scoring, evaluation, visualization, and submission infrastructure around the experimental solver.
-
----
-
-## Repository structure
+More detail is in:
 
 ~~~text
-src/arc_agi2_fun/
-    data.py
-    scoring.py
-    programs.py
-    search.py
-    solver.py
-    registry.py
-    evaluation.py
-    submission.py
-    visualize.py
-    tensors.py
-
-notebooks/
-    ops/
-        GP.py
-        eval.py
-        grid_ops.py
-        alpha_ops.py
-
-tests/
-docs/
-scripts/
+docs/GP_SP_ENVIRONMENT.md
 ~~~
 
 ---
 
 ## Current research principle
 
-The solver should avoid assuming that ARC colors, objects, or transformations have meaningful continuous distances unless an operation explicitly defines one.
-
-The working philosophy is:
-
-> **Represent exactly, partition exactly, decompose the remaining uncertainty, and search for the smallest consistent program that removes it.**
-
-This is the current estimated process, not a claim that the complete ARC solver has already been implemented.
+> **Grow interpretations on the input side, partition the known solution exactly on the output side, and let explicit structural matches progressively constrain the program search.**

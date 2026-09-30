@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-import ops.grid_ops as grid_ops
+from . import grid_ops
 import numpy as np
 
 def _copy_eval_value(value):
