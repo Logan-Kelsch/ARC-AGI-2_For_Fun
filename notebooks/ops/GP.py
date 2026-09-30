@@ -257,6 +257,58 @@ class GP_EvalTree:
 
         return node
 
+    def add_terminal_subset(
+        self,
+        parent_or_name: GP_EvalNode | str,
+        *,
+        name: str,
+        target,
+        gene_idx: int,
+        source_nodes: tuple[str, ...] = (),
+    ) -> GP_EvalNode:
+        """Retain any newly discovered subset as a terminal child.
+
+        This is the generic foundation for future partitions beyond colors.
+        The parent remains non-terminal and therefore remains testable as a
+        complete representation.
+        """
+        parent = self._resolve_node(parent_or_name)
+
+        if parent.terminal:
+            raise ValueError(
+                f"Cannot add a subset beneath terminal node {parent.name!r}."
+            )
+        if name in parent.children:
+            raise ValueError(
+                f"Evaluation node {parent.name!r} already has child {name!r}."
+            )
+
+        packed_target = (
+            target
+            if isinstance(target, np.ndarray)
+            and target.dtype == object
+            and target.ndim == 1
+            else _pack_eval_targets(list(target))
+        )
+
+        if len(packed_target) != self.sample_count:
+            raise ValueError(
+                "Subset target must contain one value per training sample."
+            )
+
+        terminal = parent.add_child(
+            GP_EvalNode(
+                name=name,
+                target=_pack_eval_targets(
+                    [_copy_eval_value(value) for value in packed_target]
+                ),
+                dynamic_terminal=True,
+                source_nodes=tuple(source_nodes),
+            )
+        )
+
+        return self.mark_terminal_solution(terminal, gene_idx)
+
     def extract_color_terminal(
         self,
         color: int,
@@ -277,10 +329,15 @@ class GP_EvalTree:
         This preserves an exact across-sample representation, including absence.
         """
         color = int(color)
+        node_name = name or f"color_{color}"
 
         if self.color_id.terminal or self.color_presence.terminal:
             raise ValueError(
                 "Cannot extract a color subset from a terminal color pool."
+            )
+        if node_name in self.composite.children:
+            raise ValueError(
+                f"Composite already contains child {node_name!r}."
             )
 
         color_ids_remaining = self.color_id.remaining_target
@@ -289,18 +346,19 @@ class GP_EvalTree:
         if color_ids_remaining is None or presence_remaining is None:
             raise ValueError("Color evaluation pools are not initialized.")
 
+        next_ids = _pack_eval_targets(
+            [_copy_eval_value(value) for value in color_ids_remaining]
+        )
+        next_presence = _pack_eval_targets(
+            [_copy_eval_value(value) for value in presence_remaining]
+        )
+
         extracted_targets = []
         found_any = False
 
         for sample_idx in range(self.sample_count):
-            ids = np.asarray(
-                color_ids_remaining[sample_idx],
-                dtype=int,
-            )
-            presence = np.asarray(
-                presence_remaining[sample_idx],
-                dtype=bool,
-            )
+            ids = np.asarray(next_ids[sample_idx], dtype=int)
+            presence = np.asarray(next_presence[sample_idx], dtype=bool)
 
             if presence.ndim != 3:
                 raise ValueError(
@@ -328,8 +386,8 @@ class GP_EvalTree:
                 subset[0] = np.asarray([color], dtype=int)
                 subset[1] = presence[index:index + 1].copy()
 
-                color_ids_remaining[sample_idx] = np.delete(ids, index)
-                presence_remaining[sample_idx] = np.delete(
+                next_ids[sample_idx] = np.delete(ids, index)
+                next_presence[sample_idx] = np.delete(
                     presence,
                     index,
                     axis=0,
@@ -348,22 +406,18 @@ class GP_EvalTree:
                 f"Color {color} is not available in the remaining color pools."
             )
 
-        node_name = name or f"color_{color}"
-        if node_name in self.composite.children:
-            raise ValueError(
-                f"Composite already contains child {node_name!r}."
-            )
-
-        terminal = self.composite.add_child(
-            GP_EvalNode(
-                name=node_name,
-                target=_pack_eval_targets(extracted_targets),
-                dynamic_terminal=True,
-                source_nodes=("color_id", "color_presence"),
-            )
+        terminal = self.add_terminal_subset(
+            self.composite,
+            name=node_name,
+            target=_pack_eval_targets(extracted_targets),
+            gene_idx=gene_idx,
+            source_nodes=("color_id", "color_presence"),
         )
 
-        return self.mark_terminal_solution(terminal, gene_idx)
+        self.color_id.remaining_target = next_ids
+        self.color_presence.remaining_target = next_presence
+
+        return terminal
 
     def clear_answers(self) -> None:
         """Reset discovery history and restore all mutable pools."""
