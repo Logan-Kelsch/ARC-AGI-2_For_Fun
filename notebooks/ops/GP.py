@@ -548,7 +548,7 @@ class GP_Set:
     output: np.ndarray 
     data: np.ndarray      # dtype=object
     op: np.ndarray        # strings
-    source: np.ndarray    # ints
+    source: np.ndarray    # int or collection of source gene indices
     status: np.ndarray    # strings
     eval_tree: GP_EvalTree | None = None
 
@@ -565,6 +565,157 @@ class GP_Set:
 
     def __len__(self):
         return len(self.data)
+
+    def get_essential_gidx(self):
+        """Return gene indices directly used by retained evaluation solutions."""
+        return get_essential_gidx(self)
+
+    def get_essential_gidx_tree(self):
+        """Return solution genes plus every recursive source dependency."""
+        return get_essential_gidx_tree(self)
+
+
+def get_essential_gidx(gp_set):
+    """Return unique gene indices directly used by evaluation-tree solutions.
+
+    Solution order follows GP_EvalTree.solution_number. If multiple retained
+    solutions use the same gene index, that index is returned only once at its
+    first occurrence.
+    """
+    if gp_set.eval_tree is None:
+        raise ValueError("GP_Set has no evaluation tree.")
+
+    essential = []
+    seen = set()
+
+    solution_nodes = sorted(
+        (
+            node
+            for node in gp_set.eval_tree.walk()
+            if node.answer_present and node.gene_idx >= 0
+        ),
+        key=lambda node: (
+            node.solution_number
+            if node.solution_number >= 1
+            else float("inf")
+        ),
+    )
+
+    for node in solution_nodes:
+        gene_idx = int(node.gene_idx)
+
+        if gene_idx not in seen:
+            essential.append(gene_idx)
+            seen.add(gene_idx)
+
+    return essential
+
+
+def _source_gidx_list(source_value):
+    """Normalize one GP_Set.source entry into a flat list of source indices.
+
+    A source may be:
+      - -1 for a raw/source-free gene,
+      - one integer gene index,
+      - a list/tuple/ndarray of multiple source indices,
+      - nested combinations of those containers.
+
+    -1 entries terminate that dependency branch and are not returned.
+    """
+    if isinstance(source_value, np.generic):
+        source_value = source_value.item()
+
+    if isinstance(source_value, np.ndarray):
+        if source_value.ndim == 0:
+            return _source_gidx_list(source_value.item())
+        source_value = source_value.tolist()
+
+    if isinstance(source_value, (list, tuple)):
+        result = []
+        seen = set()
+
+        for item in source_value:
+            for gene_idx in _source_gidx_list(item):
+                if gene_idx not in seen:
+                    result.append(gene_idx)
+                    seen.add(gene_idx)
+
+        return result
+
+    if isinstance(source_value, bool):
+        raise TypeError("GP source indices may not be booleans.")
+
+    if isinstance(source_value, (int, np.integer)):
+        source_idx = int(source_value)
+
+        if source_idx == -1:
+            return []
+        if source_idx < -1:
+            raise ValueError(
+                f"GP source index must be -1 or non-negative, got {source_idx}."
+            )
+
+        return [source_idx]
+
+    raise TypeError(
+        "GP source entries must be an integer, -1, or a nested "
+        "list/tuple/ndarray of integer indices."
+    )
+
+
+def get_essential_gidx_tree(gp_set):
+    """Return the dependency-complete minimal gene-index reconstruction set.
+
+    Starts from get_essential_gidx(gp_set), then recursively follows
+    gp_set.source[gene_idx] until every branch terminates at a source entry of
+    -1.
+
+    Multiple-source genes are fully expanded. Returned indices are unique and
+    dependency-first: every source gene appears before any gene that depends on
+    it. This makes the output suitable for reconstructing a minimal GP program
+    in executable order.
+    """
+    roots = get_essential_gidx(gp_set)
+
+    if not roots:
+        return []
+
+    source_count = len(gp_set.source)
+    ordered = []
+    visited = set()
+    visiting = set()
+
+    def visit(gene_idx):
+        gene_idx = int(gene_idx)
+
+        if gene_idx in visited:
+            return
+
+        if gene_idx in visiting:
+            raise ValueError(
+                f"Cycle detected in GP source dependencies at gene {gene_idx}."
+            )
+
+        if gene_idx < 0 or gene_idx >= source_count:
+            raise IndexError(
+                f"Gene index {gene_idx} has no matching GP_Set.source entry "
+                f"(source length={source_count})."
+            )
+
+        visiting.add(gene_idx)
+
+        for source_idx in _source_gidx_list(gp_set.source[gene_idx]):
+            visit(source_idx)
+
+        visiting.remove(gene_idx)
+        visited.add(gene_idx)
+        ordered.append(gene_idx)
+
+    for root_idx in roots:
+        visit(root_idx)
+
+    return ordered
+
 
 def init_gp_mat(grid_set):
     #we will be recieving the training grid
