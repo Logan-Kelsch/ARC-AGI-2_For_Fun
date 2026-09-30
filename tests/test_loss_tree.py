@@ -54,11 +54,11 @@ def test_transition_orientation_is_predicted_rows_target_columns():
 
 def test_uniform_off_diagonal_color_mapping_is_solved_source_state():
     predicted = [
-        np.array([[1, 0, 1, 1, 0, 1]]),
-        np.array([[1, 1, 0, 1, 0, 1]]),
-        np.array([[1, 0, 1, 0, 1]]),
-        np.array([[1, 1, 1, 0, 0, 1]]),
-        np.array([[1, 0, 1, 1, 0]]),
+        np.ones((1, 6), dtype=int),
+        np.ones((1, 6), dtype=int),
+        np.ones((1, 5), dtype=int),
+        np.ones((1, 6), dtype=int),
+        np.ones((1, 5), dtype=int),
     ]
     target = [
         np.zeros_like(grid)
@@ -73,7 +73,7 @@ def test_uniform_off_diagonal_color_mapping_is_solved_source_state():
     assert one.solved
     assert one.source == 1
     assert one.target == 0
-    assert one.target_counts == {0: 20}
+    assert one.target_counts == {0: 28}
     assert one.sample_indices == (0, 1, 2, 3, 4)
     assert one.solution_idx == -1
 
