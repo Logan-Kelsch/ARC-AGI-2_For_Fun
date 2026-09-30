@@ -54,11 +54,11 @@ class TransitionStateNode:
     A node represents the state we are coming FROM. All observed targets for
     that source are retained across the complete sample set.
 
-    solved=True means the source has exactly one observed target everywhere it
-    appears. This is functional uniformity, even when the mapping is off the
-    diagonal (for example color 1 -> color 0).
+    uniform=True means the source has exactly one observed target everywhere
+    it appears. This describes functional uniformity only; it does not claim
+    that GP has solved the transformation.
 
-    unsolved means the same source branches to more than one target.
+    uniform=False means the same source branches to more than one target.
     """
 
     source: int
@@ -72,12 +72,12 @@ class TransitionStateNode:
         return tuple(sorted(self.target_counts))
 
     @property
-    def solved(self) -> bool:
+    def uniform(self) -> bool:
         return len(self.targets) == 1
 
     @property
     def target(self) -> int | None:
-        if not self.solved:
+        if not self.uniform:
             return None
         return self.targets[0]
 
@@ -111,13 +111,9 @@ class LossNode:
     addition, every source state with a nonzero delta is represented by a
     TransitionStateNode in state_nodes.
 
-    state_nodes are partitioned by functional uniformity:
-      - solved_states: source maps to exactly one target across all observations
-      - unsolved_states: source maps to multiple targets
-
-    This is intentionally different from exact prediction resolution. A source
-    mapping such as 1 -> 0 can be functionally solved while the composite grid
-    is still incorrect relative to the raw input prediction.
+    Each state node reports only whether its observed source-to-target mapping
+    is uniform. The loss layer does not decide whether a GP gene has solved the
+    transformation; that belongs in the later GP evaluation layer.
     """
 
     name: str
@@ -172,17 +168,11 @@ class LossNode:
         return _matrix_is_diagonal(self.matrix)
 
     @property
-    def solved_states(self) -> tuple[TransitionStateNode, ...]:
-        return tuple(node for node in self.state_nodes if node.solved)
-
-    @property
-    def unsolved_states(self) -> tuple[TransitionStateNode, ...]:
-        return tuple(node for node in self.state_nodes if not node.solved)
-
-    @property
-    def nonzero_delta_resolved(self) -> bool:
-        """Whether every represented nonzero-delta source is deterministic."""
-        return bool(self.state_nodes) and not self.unsolved_states
+    def uniform(self) -> bool:
+        """Whether every represented nonzero-delta source has one target."""
+        if self.children:
+            return all(child.uniform for child in self.children)
+        return all(node.uniform for node in self.state_nodes)
 
     def source_state(self, source: int) -> TransitionStateNode:
         for node in self.state_nodes:
@@ -225,7 +215,7 @@ class LossNode:
         *,
         sample_idx: int | None = None,
     ) -> str:
-        """Classify a FROM state as unused, identity, solved, or unsolved."""
+        """Classify a FROM state as unused, identity, uniform, or nonuniform."""
         if self.matrix is None:
             raise ValueError(
                 f"Node {self.name!r} does not contain a transition matrix."
@@ -252,9 +242,9 @@ class LossNode:
             return "identity"
 
         if len(targets) == 1:
-            return "solved"
+            return "uniform"
 
-        return "unsolved"
+        return "nonuniform"
 
     def state_resolved(
         self,
@@ -262,11 +252,11 @@ class LossNode:
         *,
         sample_idx: int | None = None,
     ) -> bool:
-        """True when a FROM state has one deterministic observed target."""
+        """Compatibility check for one-target source-state behavior."""
         return self.state_status(
             state,
             sample_idx=sample_idx,
-        ) in {"identity", "solved"}
+        ) in {"identity", "uniform"}
 
     def degeneracies(
         self,
@@ -429,7 +419,7 @@ class LossTree:
                     dict(counts)
                     for counts in node.sample_target_counts
                 ),
-                "solved": node.solved,
+                "uniform": node.uniform,
                 "target": node.target,
                 "solution_idx": node.solution_idx,
             }
@@ -444,14 +434,11 @@ class LossTree:
                     matrix.copy()
                     for matrix in node.sample_matrices
                 ),
-                "solved_states": tuple(
+                "state_nodes": tuple(
                     state_summary(state)
-                    for state in node.solved_states
+                    for state in node.state_nodes
                 ),
-                "unsolved_states": tuple(
-                    state_summary(state)
-                    for state in node.unsolved_states
-                ),
+                "uniform": node.uniform,
                 "solution_idx": node.solution_idx,
             }
 
@@ -799,21 +786,19 @@ def inspect_loss(
     show_samples: bool = True,
     show_unused_colors: bool = False,
 ) -> str:
-    """Print source-state functional partitions for the loss tree.
+    """Print the observed loss structure with uniformity checks.
 
-    Only source states with a nonzero delta are represented beneath h, w, and
-    composite. Each source state appears exactly once.
+    Nonzero-delta source states appear directly beneath h, w, or composite.
 
-    solved:
-        The source maps to exactly one target across every observed occurrence
-        in the supplied samples. The mapping may be off-diagonal.
+    ✓ means the observed source maps to exactly one target across all supplied
+      observations.
+    X means the observed source maps to multiple targets.
 
-    unsolved:
-        The same source maps to multiple target states.
+    These markers describe only the structure of the observed mapping. They do
+    not mean that a GP gene has solved the transformation.
 
-    show_unused_colors remains accepted for notebook compatibility, but identity
-    and unused color states are intentionally omitted from the nonzero-delta
-    tree.
+    Identity-only and unused states are omitted from the nonzero-delta tree.
+    show_unused_colors is retained only for notebook-call compatibility.
     """
     if not isinstance(tree, LossTree):
         raise TypeError("inspect_loss expects a LossTree.")
@@ -821,89 +806,60 @@ def inspect_loss(
     check = "✓"
     cross = "X"
 
-    def marker(resolved: bool) -> str:
-        return check if resolved else cross
+    def marker(uniform: bool) -> str:
+        return check if uniform else cross
 
-    def append_state_partition(
+    def append_state_nodes(
         lines: list[str],
         node: LossNode,
         *,
         prefix: str,
     ) -> None:
-        solved = node.solved_states
-        unsolved = node.unsolved_states
+        if not node.state_nodes:
+            lines.append(f"{prefix}└── {check} no nonzero delta")
+            return
 
-        lines.append(f"{prefix}├── solved ({len(solved)})")
-        if not solved:
-            lines.append(f"{prefix}│   └── none")
-        else:
-            for idx, state_node in enumerate(solved):
-                state_branch = "└──" if idx == len(solved) - 1 else "├──"
-                sample_prefix = (
-                    f"{prefix}│       "
-                    if idx == len(solved) - 1
-                    else f"{prefix}│   │   "
-                )
+        for idx, state_node in enumerate(node.state_nodes):
+            is_last = idx == len(node.state_nodes) - 1
+            branch = "└──" if is_last else "├──"
+            child_prefix = (
+                f"{prefix}    "
+                if is_last
+                else f"{prefix}│   "
+            )
 
-                lines.append(
-                    f"{prefix}│   {state_branch} {check} "
-                    f"{_format_source_mapping(state_node)} | "
-                    f"observed {state_node.observed_sample_count}/"
-                    f"{tree.sample_count} samples | "
-                    f"solution_idx={state_node.solution_idx}"
-                )
+            lines.append(
+                f"{prefix}{branch} {marker(state_node.uniform)} "
+                f"{_format_source_mapping(state_node)} | "
+                f"observed {state_node.observed_sample_count}/"
+                f"{tree.sample_count} samples | "
+                f"solution_idx={state_node.solution_idx}"
+            )
 
-                if show_samples:
-                    for sample_idx in state_node.sample_indices:
-                        counts = state_node.sample_target_counts[sample_idx]
-                        lines.append(
-                            f"{sample_prefix}sample {sample_idx}: "
-                            f"{_format_source_mapping(state_node, counts)}"
-                        )
-
-        lines.append(f"{prefix}└── unsolved ({len(unsolved)})")
-        if not unsolved:
-            lines.append(f"{prefix}    └── none")
-        else:
-            for idx, state_node in enumerate(unsolved):
-                state_branch = "└──" if idx == len(unsolved) - 1 else "├──"
-                sample_prefix = (
-                    f"{prefix}        "
-                    if idx == len(unsolved) - 1
-                    else f"{prefix}    │   "
-                )
-
-                lines.append(
-                    f"{prefix}    {state_branch} {cross} "
-                    f"{_format_source_mapping(state_node)} | "
-                    f"observed {state_node.observed_sample_count}/"
-                    f"{tree.sample_count} samples | "
-                    f"solution_idx={state_node.solution_idx}"
-                )
-
-                if show_samples:
-                    for sample_idx in state_node.sample_indices:
-                        counts = state_node.sample_target_counts[sample_idx]
-                        lines.append(
-                            f"{sample_prefix}sample {sample_idx}: "
-                            f"{_format_source_mapping(state_node, counts)}"
-                        )
+            if show_samples:
+                for sample_idx in state_node.sample_indices:
+                    counts = state_node.sample_target_counts[sample_idx]
+                    lines.append(
+                        f"{child_prefix}sample {sample_idx}: "
+                        f"{_format_source_mapping(state_node, counts)}"
+                    )
 
     lines = [
-        f"{marker(tree.resolved)} root | {tree.sample_count} sample(s)",
-        f"├── {marker(tree.shape.resolved)} shape",
-        f"│   ├── {marker(tree.h.resolved)} h",
+        f"{marker(tree.root.children[0].uniform and tree.root.children[1].uniform)} "
+        f"root | {tree.sample_count} sample(s)",
+        f"├── {marker(tree.shape.uniform)} shape",
+        f"│   ├── {marker(tree.h.uniform)} h",
     ]
 
-    append_state_partition(lines, tree.h, prefix="│   │   ")
+    append_state_nodes(lines, tree.h, prefix="│   │   ")
 
-    lines.append(f"│   └── {marker(tree.w.resolved)} w")
-    append_state_partition(lines, tree.w, prefix="│       ")
+    lines.append(f"│   └── {marker(tree.w.uniform)} w")
+    append_state_nodes(lines, tree.w, prefix="│       ")
 
     lines.append(
-        f"└── {marker(tree.composite.resolved)} composite"
+        f"└── {marker(tree.composite.uniform)} composite"
     )
-    append_state_partition(lines, tree.composite, prefix="    ")
+    append_state_nodes(lines, tree.composite, prefix="    ")
 
     report = "\n".join(lines)
     print(report)
