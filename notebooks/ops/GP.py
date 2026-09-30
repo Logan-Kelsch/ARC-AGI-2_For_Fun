@@ -273,7 +273,10 @@ class GP_EvalTree:
         complete representation.
         """
         parent = self._resolve_node(parent_or_name)
+        gene_idx = int(gene_idx)
 
+        if gene_idx < 0:
+            raise ValueError("gene_idx must be non-negative.")
         if parent.terminal:
             raise ValueError(
                 f"Cannot add a subset beneath terminal node {parent.name!r}."
