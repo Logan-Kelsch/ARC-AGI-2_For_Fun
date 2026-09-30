@@ -33,20 +33,6 @@ def _state_is_used(matrix: np.ndarray, state: int) -> bool:
     )
 
 
-def _state_is_resolved(matrix: np.ndarray, state: int) -> bool:
-    matrix = np.asarray(matrix)
-
-    row = matrix[state, :].copy()
-    col = matrix[:, state].copy()
-    row[state] = 0
-    col[state] = 0
-
-    return bool(
-        np.count_nonzero(row) == 0
-        and np.count_nonzero(col) == 0
-    )
-
-
 @dataclass
 class TransitionStateNode:
     """One nonzero-delta source state in a transition-matrix leaf.
@@ -246,17 +232,6 @@ class LossNode:
 
         return "nonuniform"
 
-    def state_resolved(
-        self,
-        state: int,
-        *,
-        sample_idx: int | None = None,
-    ) -> bool:
-        """Compatibility check for one-target source-state behavior."""
-        return self.state_status(
-            state,
-            sample_idx=sample_idx,
-        ) in {"identity", "uniform"}
 
     def degeneracies(
         self,
@@ -845,8 +820,7 @@ def inspect_loss(
                     )
 
     lines = [
-        f"{marker(tree.root.children[0].uniform and tree.root.children[1].uniform)} "
-        f"root | {tree.sample_count} sample(s)",
+        f"{marker(tree.root.uniform)} root | {tree.sample_count} sample(s)",
         f"├── {marker(tree.shape.uniform)} shape",
         f"│   ├── {marker(tree.h.uniform)} h",
     ]
