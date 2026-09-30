@@ -1,7 +1,16 @@
 import numpy as np
 import pytest
 
-from notebooks.ops.GP import GP_Set, gp_fill_status
+from types import SimpleNamespace
+
+from notebooks.ops.GP import (
+    GP_EvalNode,
+    GP_EvalTree,
+    GP_Set,
+    gp_fill_status,
+    init_gp_eval_tree,
+    init_gp_mat,
+)
 
 
 def _gp_set(rows, statuses):
@@ -140,3 +149,198 @@ def test_missing_gene_for_any_sample_raises():
 
     with pytest.raises(ValueError, match="does not contain gene index 1"):
         gp_fill_status(gp_set)
+
+
+
+def test_init_gp_mat_attaches_output_evaluation_tree():
+    train = [
+        SimpleNamespace(
+            input=np.array(
+                [
+                    [0, 1, 1],
+                    [0, 0, 1],
+                ]
+            ),
+            output=np.array(
+                [
+                    [0, 1, 1],
+                    [0, 0, 1],
+                ]
+            ),
+        ),
+        SimpleNamespace(
+            input=np.array(
+                [
+                    [2, 0],
+                    [2, 2],
+                    [0, 0],
+                ]
+            ),
+            output=np.array(
+                [
+                    [2, 0],
+                    [2, 2],
+                    [0, 0],
+                ]
+            ),
+        ),
+    ]
+
+    gp_set = init_gp_mat(train)
+    tree = gp_set.eval_tree
+
+    assert isinstance(tree, GP_EvalTree)
+    assert tree.sample_count == 2
+
+    assert set(tree.root.children) == {"shape", "composite"}
+    assert set(tree.shape.children) == {"h", "w"}
+    assert set(tree.composite.children) == {
+        "color_id",
+        "color_presence",
+    }
+
+
+def test_gp_eval_tree_stores_exact_output_targets_for_every_sample():
+    outputs = [
+        np.array(
+            [
+                [0, 1, 1],
+                [0, 0, 1],
+            ]
+        ),
+        np.array(
+            [
+                [2, 0],
+                [2, 2],
+                [0, 0],
+            ]
+        ),
+    ]
+
+    tree = init_gp_eval_tree(outputs)
+
+    assert np.array_equal(tree.root.target[0], outputs[0])
+    assert np.array_equal(tree.root.target[1], outputs[1])
+
+    assert np.array_equal(tree.shape.target[0], np.array([2, 3]))
+    assert np.array_equal(tree.shape.target[1], np.array([3, 2]))
+
+    assert tree.h.target.tolist() == [2, 3]
+    assert tree.w.target.tolist() == [3, 2]
+
+    assert np.array_equal(tree.color_id.target[0], np.array([0, 1]))
+    assert np.array_equal(tree.color_id.target[1], np.array([0, 2]))
+
+    assert tree.color_presence.target[0].shape == (2, 2, 3)
+    assert tree.color_presence.target[1].shape == (2, 3, 2)
+
+    composite_0 = tree.composite.target[0]
+    assert np.array_equal(composite_0[0], tree.color_id.target[0])
+    assert np.array_equal(
+        composite_0[1],
+        tree.color_presence.target[0],
+    )
+
+
+def test_eval_tree_nodes_start_unanswered_with_no_gene_index():
+    tree = init_gp_eval_tree(
+        [
+            np.array([[0, 1]]),
+            np.array([[2], [2]]),
+        ]
+    )
+
+    for node in tree.walk():
+        assert isinstance(node, GP_EvalNode)
+        assert node.answer_present is False
+        assert node.gene_idx == -1
+
+
+def test_shape_identity_gene_can_later_be_associated_exactly_across_samples():
+    train = [
+        SimpleNamespace(
+            input=np.array(
+                [
+                    [0, 1, 1],
+                    [0, 0, 1],
+                ]
+            ),
+            output=np.array(
+                [
+                    [0, 1, 1],
+                    [0, 0, 1],
+                ]
+            ),
+        ),
+        SimpleNamespace(
+            input=np.array(
+                [
+                    [2, 0],
+                    [2, 2],
+                    [0, 0],
+                ]
+            ),
+            output=np.array(
+                [
+                    [2, 0],
+                    [2, 2],
+                    [0, 0],
+                ]
+            ),
+        ),
+    ]
+
+    gp_set = init_gp_mat(train)
+    shape_node = gp_set.eval_tree.shape
+
+    # Gene index 1 is currently the input-shape extraction gene.
+    # The future evaluator should be able to establish this exact equality
+    # across all samples. This test only proves the representations align.
+    for sample_idx in range(len(train)):
+        assert np.array_equal(
+            gp_set.data[sample_idx][1],
+            shape_node.target[sample_idx],
+        )
+
+    assert shape_node.answer_present is False
+    assert shape_node.gene_idx == -1
+
+    shape_node.mark_answer(1)
+
+    assert shape_node.answer_present is True
+    assert shape_node.gene_idx == 1
+
+
+def test_mark_and_clear_answer_only_manage_retained_bookkeeping():
+    node = GP_EvalNode(
+        name="example",
+        target=np.array([1, 2], dtype=object),
+    )
+
+    with pytest.raises(ValueError):
+        node.mark_answer(-1)
+
+    node.mark_answer(4)
+
+    assert node.answer_present is True
+    assert node.gene_idx == 4
+
+    node.clear_answer()
+
+    assert node.answer_present is False
+    assert node.gene_idx == -1
+
+
+def test_clear_answers_resets_entire_eval_tree():
+    tree = init_gp_eval_tree([np.array([[0]])])
+
+    tree.root.mark_answer(0)
+    tree.shape.mark_answer(1)
+    tree.color_presence.mark_answer(3)
+
+    tree.clear_answers()
+
+    assert all(
+        not node.answer_present and node.gene_idx == -1
+        for node in tree.walk()
+    )
