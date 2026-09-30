@@ -1,7 +1,14 @@
 """Notebook-local analytical operation library."""
 
 from .alpha_ops import DEFAULT_ABS_KERNELS, survey_abs_kernels
-from .GP import GP_Set, gp_fill_status, init_gp_mat
+from .GP import (
+    GP_EvalNode,
+    GP_EvalTree,
+    GP_Set,
+    gp_fill_status,
+    init_gp_eval_tree,
+    init_gp_mat,
+)
 from .grid_ops import grid_dissection
 from .loss import (
     ARC_COLOR_COUNT,
@@ -24,7 +31,10 @@ from .loss import (
 __all__ = [
     "DEFAULT_ABS_KERNELS",
     "survey_abs_kernels",
+    "GP_EvalNode",
+    "GP_EvalTree",
     "GP_Set",
+    "init_gp_eval_tree",
     "init_gp_mat",
     "gp_fill_status",
     "grid_dissection",
