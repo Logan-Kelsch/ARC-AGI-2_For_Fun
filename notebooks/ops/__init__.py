@@ -3,6 +3,17 @@
 from .alpha_ops import DEFAULT_ABS_KERNELS, survey_abs_kernels
 from .GP import GP_Set, gp_fill_status, init_gp_mat
 from .grid_ops import grid_dissection
+from .loss import (
+    ARC_COLOR_COUNT,
+    INVALID_STATE,
+    TRANSITION_LABELS,
+    TRANSITION_STATE_COUNT,
+    LossNode,
+    LossTree,
+    color_transition_matrix,
+    loss_resolution,
+    resolve_loss_tree,
+)
 
 __all__ = [
     "DEFAULT_ABS_KERNELS",
@@ -11,4 +22,13 @@ __all__ = [
     "init_gp_mat",
     "gp_fill_status",
     "grid_dissection",
+    "ARC_COLOR_COUNT",
+    "INVALID_STATE",
+    "TRANSITION_LABELS",
+    "TRANSITION_STATE_COUNT",
+    "LossNode",
+    "LossTree",
+    "color_transition_matrix",
+    "loss_resolution",
+    "resolve_loss_tree",
 ]
