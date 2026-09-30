@@ -2,23 +2,61 @@ from dataclasses import dataclass, field
 import ops.grid_ops as grid_ops
 import numpy as np
 
+def _copy_eval_value(value):
+    """Copy heterogeneous evaluation values without coercing their structure."""
+    if isinstance(value, np.ndarray):
+        if value.dtype == object:
+            copied = np.empty(value.shape, dtype=object)
+            for index in np.ndindex(value.shape):
+                copied[index] = _copy_eval_value(value[index])
+            return copied
+        return value.copy()
+
+    if isinstance(value, list):
+        return [_copy_eval_value(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(_copy_eval_value(item) for item in value)
+
+    return value
+
+
+def _pack_eval_targets(values) -> np.ndarray:
+    """Store heterogeneous per-sample targets without NumPy coercion."""
+    packed = np.empty(len(values), dtype=object)
+
+    for sample_idx, value in enumerate(values):
+        packed[sample_idx] = _copy_eval_value(value)
+
+    return packed
+
+
 @dataclass
 class GP_EvalNode:
-    """One target location in the GP_Set evaluation tree.
+    """One retained target location in the GP_Set evaluation tree.
 
-    target is an outer object array with one exact target value per training
-    sample. A future GP evaluator will compare one GP gene column against this
-    target vector across every sample.
+    target always preserves the full original output-side representation.
 
-    answer_present and gene_idx are intentionally only bookkeeping fields here.
-    This module does not search for matching genes yet.
+    remaining_target is optional mutable pool state. It is used when a node can
+    be partitioned into independently discovered subsets, such as color_id and
+    color_presence. Extracting a subset changes remaining_target but never
+    destroys target, so parent/full-output targets remain testable.
+
+    A discovered answer is terminal when that exact target/subset should no
+    longer be offered to later evaluation passes.
     """
 
     name: str
     target: np.ndarray
     answer_present: bool = False
     gene_idx: int = -1
+    solution_number: int = -1
+    terminal: bool = False
     children: dict[str, "GP_EvalNode"] = field(default_factory=dict)
+    remaining_target: np.ndarray | None = None
+    is_pool: bool = False
+    dynamic_terminal: bool = False
+    source_nodes: tuple[str, ...] = ()
 
     def add_child(self, child: "GP_EvalNode") -> "GP_EvalNode":
         if child.name in self.children:
@@ -53,26 +91,60 @@ class GP_EvalNode:
     def sample_count(self) -> int:
         return len(self.target)
 
-    def sample_target(self, sample_idx: int):
-        return self.target[sample_idx]
+    @property
+    def searchable(self) -> bool:
+        return not self.terminal
 
-    def mark_answer(self, gene_idx: int) -> None:
-        """Associate an exact across-sample GP gene with this target node."""
+    def sample_target(self, sample_idx: int, *, remaining: bool = False):
+        values = (
+            self.remaining_target
+            if remaining and self.remaining_target is not None
+            else self.target
+        )
+        return values[sample_idx]
+
+    def _mark_terminal(
+        self,
+        *,
+        gene_idx: int,
+        solution_number: int,
+    ) -> None:
         gene_idx = int(gene_idx)
+        solution_number = int(solution_number)
+
         if gene_idx < 0:
             raise ValueError("gene_idx must be non-negative.")
+        if solution_number < 1:
+            raise ValueError("solution_number must be >= 1.")
+        if self.terminal:
+            raise ValueError(
+                f"Evaluation node {self.name!r} is already terminal."
+            )
 
         self.answer_present = True
         self.gene_idx = gene_idx
+        self.solution_number = solution_number
+        self.terminal = True
 
     def clear_answer(self) -> None:
         self.answer_present = False
         self.gene_idx = -1
+        self.solution_number = -1
+        self.terminal = False
+
+    def reset_remaining_target(self) -> None:
+        if not self.is_pool:
+            self.remaining_target = None
+            return
+
+        self.remaining_target = _pack_eval_targets(
+            [_copy_eval_value(value) for value in self.target]
+        )
 
 
 @dataclass
 class GP_EvalTree:
-    """Retained output-target decomposition owned by a GP_Set.
+    """Persistent output-target decomposition owned by a GP_Set.
 
     Structure:
 
@@ -81,15 +153,16 @@ class GP_EvalTree:
         │   ├── h
         │   └── w
         └── composite
-            ├── color_id
-            └── color_presence
+            ├── color_id          (pool)
+            ├── color_presence    (pool)
+            └── dynamically extracted terminal subsets
 
-    Every node stores the exact target representation for every training sample.
-    Future evaluation code can mark nodes when a GP gene column exactly matches
-    that target vector across all samples.
+    Solution numbering is global to this tree and starts at 1. The tree only
+    records discoveries; it does not search GP_Set.data for them.
     """
 
     root: GP_EvalNode
+    next_solution_number: int = 1
 
     def __getitem__(self, name: str) -> GP_EvalNode:
         return self.root.find(name)
@@ -125,30 +198,256 @@ class GP_EvalTree:
     def walk(self):
         return self.root.walk()
 
+    @property
+    def terminal_nodes(self) -> tuple[GP_EvalNode, ...]:
+        """Discovered terminals in chronological solution order."""
+        return tuple(
+            sorted(
+                (
+                    node
+                    for node in self.walk()
+                    if node.terminal and node.solution_number >= 1
+                ),
+                key=lambda node: node.solution_number,
+            )
+        )
+
+    def searchable_nodes(self) -> tuple[GP_EvalNode, ...]:
+        """Nodes available to a future evaluator.
+
+        A terminal node closes its own branch, so its descendants are not
+        returned. Ancestors remain searchable and can still be discovered later.
+        Dynamic terminal subset nodes are retained for history but never
+        re-enter the search.
+        """
+        nodes: list[GP_EvalNode] = []
+
+        def visit(node: GP_EvalNode) -> None:
+            if node.terminal:
+                return
+
+            nodes.append(node)
+
+            for child in node.children.values():
+                visit(child)
+
+        visit(self.root)
+        return tuple(nodes)
+
+    def _resolve_node(self, node_or_name: GP_EvalNode | str) -> GP_EvalNode:
+        if isinstance(node_or_name, GP_EvalNode):
+            return node_or_name
+        if isinstance(node_or_name, str):
+            return self[node_or_name]
+        raise TypeError("Expected a GP_EvalNode or node name.")
+
+    def mark_terminal_solution(
+        self,
+        node_or_name: GP_EvalNode | str,
+        gene_idx: int,
+    ) -> GP_EvalNode:
+        """Chronologically record an exact discovered node solution."""
+        node = self._resolve_node(node_or_name)
+
+        node._mark_terminal(
+            gene_idx=gene_idx,
+            solution_number=self.next_solution_number,
+        )
+        self.next_solution_number += 1
+
+        return node
+
+    def add_terminal_subset(
+        self,
+        parent_or_name: GP_EvalNode | str,
+        *,
+        name: str,
+        target,
+        gene_idx: int,
+        source_nodes: tuple[str, ...] = (),
+    ) -> GP_EvalNode:
+        """Retain any newly discovered subset as a terminal child.
+
+        This is the generic foundation for future partitions beyond colors.
+        The parent remains non-terminal and therefore remains testable as a
+        complete representation.
+        """
+        parent = self._resolve_node(parent_or_name)
+        gene_idx = int(gene_idx)
+
+        if gene_idx < 0:
+            raise ValueError("gene_idx must be non-negative.")
+        if parent.terminal:
+            raise ValueError(
+                f"Cannot add a subset beneath terminal node {parent.name!r}."
+            )
+        if name in parent.children:
+            raise ValueError(
+                f"Evaluation node {parent.name!r} already has child {name!r}."
+            )
+
+        packed_target = (
+            target
+            if isinstance(target, np.ndarray)
+            and target.dtype == object
+            and target.ndim == 1
+            else _pack_eval_targets(list(target))
+        )
+
+        if len(packed_target) != self.sample_count:
+            raise ValueError(
+                "Subset target must contain one value per training sample."
+            )
+
+        terminal = parent.add_child(
+            GP_EvalNode(
+                name=name,
+                target=_pack_eval_targets(
+                    [_copy_eval_value(value) for value in packed_target]
+                ),
+                dynamic_terminal=True,
+                source_nodes=tuple(source_nodes),
+            )
+        )
+
+        return self.mark_terminal_solution(terminal, gene_idx)
+
+    def extract_color_terminal(
+        self,
+        color: int,
+        gene_idx: int,
+        *,
+        name: str | None = None,
+    ) -> GP_EvalNode:
+        """Extract one color ID + presence subset into a terminal solution.
+
+        The original color_id/color_presence targets and the full composite
+        target remain unchanged. Only each pool's remaining_target is reduced.
+
+        Per sample, the extracted target is:
+            [array([color]), one-channel presence]
+        when the color occurs, otherwise:
+            [empty color array, empty presence channel]
+
+        This preserves an exact across-sample representation, including absence.
+        """
+        color = int(color)
+        node_name = name or f"color_{color}"
+
+        if self.color_id.terminal or self.color_presence.terminal:
+            raise ValueError(
+                "Cannot extract a color subset from a terminal color pool."
+            )
+        if node_name in self.composite.children:
+            raise ValueError(
+                f"Composite already contains child {node_name!r}."
+            )
+
+        color_ids_remaining = self.color_id.remaining_target
+        presence_remaining = self.color_presence.remaining_target
+
+        if color_ids_remaining is None or presence_remaining is None:
+            raise ValueError("Color evaluation pools are not initialized.")
+
+        next_ids = _pack_eval_targets(
+            [_copy_eval_value(value) for value in color_ids_remaining]
+        )
+        next_presence = _pack_eval_targets(
+            [_copy_eval_value(value) for value in presence_remaining]
+        )
+
+        extracted_targets = []
+        found_any = False
+
+        for sample_idx in range(self.sample_count):
+            ids = np.asarray(next_ids[sample_idx], dtype=int)
+            presence = np.asarray(next_presence[sample_idx], dtype=bool)
+
+            if presence.ndim != 3:
+                raise ValueError(
+                    "color_presence remaining targets must be 3D arrays."
+                )
+            if len(ids) != presence.shape[0]:
+                raise ValueError(
+                    "color_id and color_presence pools are misaligned."
+                )
+
+            matches = np.flatnonzero(ids == color)
+
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Color {color} appears more than once in sample "
+                    f"{sample_idx}'s color pool."
+                )
+
+            subset = np.empty(2, dtype=object)
+
+            if len(matches) == 1:
+                found_any = True
+                index = int(matches[0])
+
+                subset[0] = np.asarray([color], dtype=int)
+                subset[1] = presence[index:index + 1].copy()
+
+                next_ids[sample_idx] = np.delete(ids, index)
+                next_presence[sample_idx] = np.delete(
+                    presence,
+                    index,
+                    axis=0,
+                )
+            else:
+                subset[0] = np.empty(0, dtype=int)
+                subset[1] = np.empty(
+                    (0, presence.shape[1], presence.shape[2]),
+                    dtype=bool,
+                )
+
+            extracted_targets.append(subset)
+
+        if not found_any:
+            raise ValueError(
+                f"Color {color} is not available in the remaining color pools."
+            )
+
+        terminal = self.add_terminal_subset(
+            self.composite,
+            name=node_name,
+            target=_pack_eval_targets(extracted_targets),
+            gene_idx=gene_idx,
+            source_nodes=("color_id", "color_presence"),
+        )
+
+        self.color_id.remaining_target = next_ids
+        self.color_presence.remaining_target = next_presence
+
+        return terminal
+
     def clear_answers(self) -> None:
-        for node in self.walk():
+        """Reset discovery history and restore all mutable pools."""
+        def reset(node: GP_EvalNode) -> None:
+            dynamic_names = [
+                name
+                for name, child in node.children.items()
+                if child.dynamic_terminal
+            ]
+            for name in dynamic_names:
+                del node.children[name]
+
             node.clear_answer()
+            node.reset_remaining_target()
 
+            for child in node.children.values():
+                reset(child)
 
-def _pack_eval_targets(values) -> np.ndarray:
-    """Store heterogeneous per-sample targets without NumPy coercion."""
-    packed = np.empty(len(values), dtype=object)
-
-    for sample_idx, value in enumerate(values):
-        if isinstance(value, np.ndarray):
-            packed[sample_idx] = value.copy()
-        else:
-            packed[sample_idx] = value
-
-    return packed
+        reset(self.root)
+        self.next_solution_number = 1
 
 
 def init_gp_eval_tree(outputs) -> GP_EvalTree:
     """Build the exact output-side target decomposition for a GP_Set.
 
     No attempt is made to locate answers in GP_Set.data. This only establishes
-    the target structure that a later evaluation/search function will compare
-    against the gene matrix.
+    the target structure and mutable subset pools used by later evaluation.
     """
     outputs = list(outputs)
     if not outputs:
@@ -219,16 +518,24 @@ def init_gp_eval_tree(outputs) -> GP_EvalTree:
             target=_pack_eval_targets(composite_targets),
         )
     )
+
+    color_id_target = _pack_eval_targets(color_id_targets)
+    color_presence_target = _pack_eval_targets(color_presence_targets)
+
     composite_node.add_child(
         GP_EvalNode(
             name="color_id",
-            target=_pack_eval_targets(color_id_targets),
+            target=color_id_target,
+            remaining_target=_pack_eval_targets(color_id_targets),
+            is_pool=True,
         )
     )
     composite_node.add_child(
         GP_EvalNode(
             name="color_presence",
-            target=_pack_eval_targets(color_presence_targets),
+            target=color_presence_target,
+            remaining_target=_pack_eval_targets(color_presence_targets),
+            is_pool=True,
         )
     )
 
