@@ -663,7 +663,7 @@ def test_get_ST_unsovled_frontier_returns_unresolved_concrete_sp_data():
     # Traversal order follows the unresolved concrete proof graph:
     # raw output, h, w, then the per-color ID/mask genes.
     for result_idx, sp_gidx in enumerate(range(9)):
-        assert np.array_equal(
+        assert genes_exactly_equal(
             frontier[result_idx],
             SP_X[sp_gidx],
         )
@@ -685,7 +685,7 @@ def test_get_ST_unsovled_frontier_filters_scalar_nodes_by_dim():
     assert frontier.shape == (5,)
 
     for result_idx, sp_gidx in enumerate(expected_gidx):
-        assert np.array_equal(
+        assert genes_exactly_equal(
             frontier[result_idx],
             SP_X[sp_gidx],
         )
@@ -707,7 +707,7 @@ def test_get_ST_unsovled_frontier_filters_matrix_nodes_by_dim():
     assert frontier.shape == (4,)
 
     for result_idx, sp_gidx in enumerate(expected_gidx):
-        assert np.array_equal(
+        assert genes_exactly_equal(
             frontier[result_idx],
             SP_X[sp_gidx],
         )
@@ -765,11 +765,11 @@ def test_get_ST_unsovled_frontier_keeps_direct_and_derived_or_candidates():
     # The original source is still directly solvable, while the rotated gene is
     # an alternate OR path, so both remain in the frontier.
     assert any(
-        np.array_equal(gene, SP_X[source_gidx])
+        genes_exactly_equal(gene, SP_X[source_gidx])
         for gene in matrix_frontier
     )
     assert any(
-        np.array_equal(gene, SP_X[transformed_gidx])
+        genes_exactly_equal(gene, SP_X[transformed_gidx])
         for gene in matrix_frontier
     )
 
@@ -784,11 +784,11 @@ def test_get_ST_unsovled_frontier_keeps_direct_and_derived_or_candidates():
 
     # Directly solving the source prunes its alternate transformed subtree.
     assert not any(
-        np.array_equal(gene, SP_X[source_gidx])
+        genes_exactly_equal(gene, SP_X[source_gidx])
         for gene in matrix_frontier
     )
     assert not any(
-        np.array_equal(gene, SP_X[transformed_gidx])
+        genes_exactly_equal(gene, SP_X[transformed_gidx])
         for gene in matrix_frontier
     )
 
@@ -831,7 +831,7 @@ def test_correctly_spelled_ST_frontier_alias_matches_requested_name():
     assert requested_name.shape == corrected_alias.shape
 
     for left, right in zip(requested_name, corrected_alias):
-        assert np.array_equal(left, right)
+        assert genes_exactly_equal(left, right)
 
 
 def test_program_meta_rows_and_program_x_object_matrix_are_easy_to_inspect():
