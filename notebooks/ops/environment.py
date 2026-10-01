@@ -785,12 +785,117 @@ class SolutionTree:
         return rows
 
 
+def _normalize_pool_dim_bound(
+    name: str,
+    value: int | None,
+) -> int | None:
+    if value is None:
+        return None
+
+    if isinstance(value, bool) or not isinstance(
+        value,
+        (int, np.integer),
+    ):
+        raise TypeError(
+            f"{name} must be a non-negative integer or None."
+        )
+
+    value = int(value)
+
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0.")
+
+    return value
+
+
+def _normalize_pool_dtype(dtype: Any | None) -> np.dtype | None:
+    if dtype is None:
+        return None
+
+    try:
+        return np.dtype(dtype)
+    except TypeError as exc:
+        raise TypeError(
+            "dtype must be convertible to a NumPy dtype or None."
+        ) from exc
+
+
+def _atomic_value_dtypes(value: Any) -> set[np.dtype]:
+    """Recursively collect atomic NumPy dtypes from one instantiated value."""
+    if isinstance(value, np.ndarray):
+        if value.dtype != object:
+            return {np.dtype(value.dtype)}
+
+        dtypes: set[np.dtype] = set()
+        for item in value.flat:
+            dtypes.update(_atomic_value_dtypes(item))
+        return dtypes
+
+    if isinstance(value, (list, tuple)):
+        dtypes: set[np.dtype] = set()
+        for item in value:
+            dtypes.update(_atomic_value_dtypes(item))
+        return dtypes
+
+    return {np.dtype(np.asarray(value).dtype)}
+
+
+def _gene_matches_dtype(
+    gene: np.ndarray,
+    dtype: np.dtype | None,
+) -> bool:
+    if dtype is None:
+        return True
+
+    observed: set[np.dtype] = set()
+
+    for value in gene:
+        observed.update(_atomic_value_dtypes(value))
+
+    return bool(observed) and observed == {dtype}
+
+
+def _validate_pool_filters(
+    *,
+    min_dim: int | None,
+    max_dim: int | None,
+    dtype: Any | None,
+) -> tuple[int | None, int | None, np.dtype | None]:
+    min_dim = _normalize_pool_dim_bound("min_dim", min_dim)
+    max_dim = _normalize_pool_dim_bound("max_dim", max_dim)
+    dtype = _normalize_pool_dtype(dtype)
+
+    if (
+        min_dim is not None
+        and max_dim is not None
+        and min_dim > max_dim
+    ):
+        raise ValueError(
+            "min_dim may not be greater than max_dim."
+        )
+
+    return min_dim, max_dim, dtype
+
+
+def _pack_selected_genes(
+    genes: Iterable[np.ndarray],
+) -> np.ndarray:
+    genes = list(genes)
+    result = np.empty(len(genes), dtype=object)
+
+    for index, gene in enumerate(genes):
+        result[index] = _copy_value(gene)
+
+    return result
+
+
 def get_ST_unsovled_frontier(
     ST: SolutionTree,
     SP_X: ProgramX,
     *,
     min_dim: int | None = None,
     max_dim: int | None = None,
+    dtype: Any | None = None,
 ) -> np.ndarray:
     """Return instantiated SP data for unresolved Boolean-ST frontier nodes.
 
@@ -800,44 +905,48 @@ def get_ST_unsovled_frontier(
 
         SP_X[sp_gidx]
 
-    min_dim and max_dim are inclusive filters on the node's recorded gene
-    dimensionality. Examples:
+    Filters:
+      min_dim / max_dim:
+        Inclusive dimensionality bounds.
 
-        min_dim=0, max_dim=0  -> scalar/int/float/bool frontier genes only
-        min_dim=2, max_dim=2  -> matrix frontier genes only
-        min_dim=1             -> 1D and higher
-        max_dim=1             -> scalar and 1D
+      dtype:
+        Exact atomic NumPy dtype required across the complete gene. Examples:
+
+            dtype=bool
+            dtype=np.bool_
+            dtype=np.int64
+            dtype="float64"
+
+        dtype=None applies no dtype restriction.
+
+    Examples:
+
+        min_dim=0, max_dim=0
+            scalar frontier genes of any dtype
+
+        min_dim=2, max_dim=2, dtype=bool
+            only 2D boolean frontier genes
+
+        dtype=np.int64
+            int64 frontier genes of any dimensionality
 
     Logical helper nodes such as "shape" and "composite" have no SP gene and
     are therefore never returned.
     """
     if SP_X.side != "SP":
-        raise ValueError("get_ST_unsovled_frontier requires SP_X.side == 'SP'.")
+        raise ValueError(
+            "get_ST_unsovled_frontier requires SP_X.side == 'SP'."
+        )
 
-    def normalize_dim_bound(name: str, value: int | None) -> int | None:
-        if value is None:
-            return None
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-            raise TypeError(f"{name} must be a non-negative integer or None.")
-        value = int(value)
-        if value < 0:
-            raise ValueError(f"{name} must be >= 0.")
-        return value
+    min_dim, max_dim, dtype = _validate_pool_filters(
+        min_dim=min_dim,
+        max_dim=max_dim,
+        dtype=dtype,
+    )
 
-    min_dim = normalize_dim_bound("min_dim", min_dim)
-    max_dim = normalize_dim_bound("max_dim", max_dim)
-
-    if (
-        min_dim is not None
-        and max_dim is not None
-        and min_dim > max_dim
-    ):
-        raise ValueError("min_dim may not be greater than max_dim.")
-
-    frontier = ST.unresolved_frontier_nodes()
     selected: list[np.ndarray] = []
 
-    for node_id in frontier:
+    for node_id in ST.unresolved_frontier_nodes():
         node = ST[node_id]
 
         if node.sp_gidx is None:
@@ -858,19 +967,107 @@ def get_ST_unsovled_frontier(
         if max_dim is not None and dims > max_dim:
             continue
 
-        selected.append(_copy_value(SP_X[node.sp_gidx]))
+        gene = SP_X[node.sp_gidx]
 
-    result = np.empty(len(selected), dtype=object)
+        if not _gene_matches_dtype(gene, dtype):
+            continue
 
-    for index, gene in enumerate(selected):
-        result[index] = gene
+        selected.append(gene)
 
-    return result
+    return _pack_selected_genes(selected)
 
 
 # Correctly spelled alias for convenience; the requested public name above is
 # retained exactly.
 get_ST_unsolved_frontier = get_ST_unsovled_frontier
+
+
+def get_GP_pool(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    *,
+    min_dim: int | None = None,
+    max_dim: int | None = None,
+    dtype: Any | None = None,
+) -> np.ndarray:
+    """Return instantiated GP genes matching dimensionality/dtype filters.
+
+    The return value is a 1D object ndarray. Each entry is one complete GP gene
+    across all training samples, equivalent to:
+
+        GP_X[gidx]
+
+    Filters are identical to get_ST_unsovled_frontier:
+
+        min_dim / max_dim
+            Inclusive dimensionality bounds.
+
+        dtype
+            Exact atomic NumPy dtype across the complete gene.
+
+    Examples:
+
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+            min_dim=0,
+            max_dim=0,
+        )
+            -> all scalar GP genes, any dtype
+
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+            min_dim=2,
+            max_dim=2,
+            dtype=bool,
+        )
+            -> only 2D boolean GP genes
+
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+        )
+            -> the complete GP pool
+    """
+    if GP_meta.side != "GP":
+        raise ValueError(
+            "get_GP_pool requires GP_meta.side == 'GP'."
+        )
+    if GP_X.side != "GP":
+        raise ValueError(
+            "get_GP_pool requires GP_X.side == 'GP'."
+        )
+    if len(GP_meta) != len(GP_X):
+        raise ValueError(
+            "GP_meta and GP_X must contain the same number of genes."
+        )
+
+    min_dim, max_dim, dtype = _validate_pool_filters(
+        min_dim=min_dim,
+        max_dim=max_dim,
+        dtype=dtype,
+    )
+
+    selected: list[np.ndarray] = []
+
+    for gidx in range(len(GP_X)):
+        dims = GP_meta.dims[gidx]
+
+        if min_dim is not None and dims < min_dim:
+            continue
+        if max_dim is not None and dims > max_dim:
+            continue
+
+        gene = GP_X[gidx]
+
+        if not _gene_matches_dtype(gene, dtype):
+            continue
+
+        selected.append(gene)
+
+    return _pack_selected_genes(selected)
+
 
 
 def _extract_pair_grid(sample: Any, field_name: str) -> np.ndarray:
