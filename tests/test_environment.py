@@ -850,9 +850,14 @@ def test_gp_generate_never_retains_equivalent_gene_data():
     new_gidx = GP_generate(
         GP_meta,
         GP_X,
-        20,
+        12,
         rng=7,
-        operation_names=("partition_shape", "partition_composite"),
+        operation_names=(
+            "mat2_cwrotate",
+            "dim0_flip",
+            "dim1_flip",
+            "bool_complement",
+        ),
     )
 
     assert len(new_gidx) > 0
