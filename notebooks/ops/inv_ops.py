@@ -68,16 +68,15 @@ def _as_shape(shape: Any) -> tuple[int, ...]:
 
 @inverse_operation("partition_shape")
 def inv_partition_shape(
-    shape: Any,
+    h: Any,
+    w: Any,
     composite: Any,
 ):
-    """Validate that a reconstructed composite has the solved shape.
-
-    partition_shape does not reconstruct content by itself. In the ST root
-    proof it is paired with the composite branch; this inverse verifies that
-    the reconstructed composite has the required shape and returns it.
-    """
-    expected = _as_shape(shape)
+    """Validate that reconstructed composite matches solved h and w."""
+    expected = (
+        int(np.asarray(h).item()),
+        int(np.asarray(w).item()),
+    )
     composite_array = np.asarray(composite)
 
     if composite_array.shape != expected:
@@ -87,6 +86,32 @@ def inv_partition_shape(
         )
 
     return composite_array.copy()
+
+
+@inverse_operation("indiv_1dim")
+def inv_indiv_1dim(
+    *values: Any,
+) -> np.ndarray:
+    """Reassemble scalar element genes into their original 1D array."""
+    if len(values) == 1 and isinstance(values[0], (list, tuple)):
+        values = tuple(values[0])
+
+    if not values:
+        raise ValueError("inv_indiv_1dim requires at least one value.")
+
+    scalars = []
+
+    for value in values:
+        array = np.asarray(value)
+
+        if array.ndim != 0:
+            raise ValueError(
+                "inv_indiv_1dim expects scalar element values."
+            )
+
+        scalars.append(array.item())
+
+    return np.asarray(scalars)
 
 
 @inverse_operation("partition_composite")
