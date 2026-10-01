@@ -982,3 +982,85 @@ source through the known inverse.
 
 inv_indiv_1dim simply reassembles the scalar elements in positional order into
 the original 1D NumPy array.
+
+
+## Unresolved ST frontier
+
+Use:
+
+~~~python
+frontier = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=None,
+    max_dim=None,
+)
+~~~
+
+to retrieve the instantiated SP data that still represents unresolved concrete
+solution-tree nodes.
+
+The return value is always a 1D NumPy object array:
+
+~~~text
+frontier.shape == (L,)
+frontier.dtype == object
+~~~
+
+Each entry is one complete SP gene across all training samples, equivalent to:
+
+~~~python
+SP_X[sp_gidx]
+~~~
+
+for that frontier node.
+
+Logical helper nodes such as shape and composite are not returned because they
+do not have instantiated SP data.
+
+The traversal keeps unresolved concrete parents even when they also have OR
+alternatives. For example:
+
+~~~text
+C
+OR
+(
+    inv_rotate
+    AND R
+)
+~~~
+
+places both C and R in the unresolved frontier until C becomes solved through
+either route.
+
+Once a node is solved, its entire proof subtree is pruned from the frontier.
+
+Dimension filters are inclusive:
+
+~~~python
+# scalar int/float/bool genes only
+get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=0,
+    max_dim=0,
+)
+
+# matrices only
+get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=2,
+    max_dim=2,
+)
+
+# all 1D and higher data
+get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=1,
+)
+~~~
+
+The exact requested name get_ST_unsovled_frontier is retained. A correctly
+spelled alias, get_ST_unsolved_frontier, is exported as well.
