@@ -1136,23 +1136,11 @@ def test_bool_sum_counts_true_values_and_returns_scalar_int64():
     meta, X = _raw_program(
         "GP",
         [
-            np.array([True, False, True], dtype=bool),
-            np.array(
-                [
-                    [True, True],
-                    [False, True],
-                ],
-                dtype=bool,
-            ),
+            np.array([[True, False, True]], dtype=bool),
+            np.array([[True, True, False, True]], dtype=bool),
         ],
         raw_op="raw_input",
     )
-
-    # Keep the gene structurally consistent for this test.
-    X.genes[0] = np.empty(2, dtype=object)
-    X.genes[0][0] = np.array([[True, False, True]], dtype=bool)
-    X.genes[0][1] = np.array([[True, True, False, True]], dtype=bool)
-    meta.dims[0] = 2
 
     assert valid_generation(meta, X, bool_sum, 0)
 
@@ -1177,7 +1165,7 @@ def test_bool_sum_accepts_scalar_bool_and_rejects_non_bool():
     gidx = bool_sum(scalar_meta, scalar_X, 0)
 
     assert scalar_meta.dims[gidx] == 0
-    assert X[gidx, 0] if False else True
+    assert isinstance(scalar_X[gidx, 0], np.int64)
     assert scalar_X[gidx, 0] == 1
 
     int_meta, int_X = _raw_program(
