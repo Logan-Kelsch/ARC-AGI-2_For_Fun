@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from .inv_ops import INV_OP_REGISTRY
 from .environment import (
     ProgramMeta,
     ProgramX,
@@ -157,6 +158,12 @@ def operation(
                 for name, value in bound.arguments.items()
                 if name not in {"meta", "X", "source_idx"}
             }
+
+            if info.inverse_op and info.inverse_op not in INV_OP_REGISTRY:
+                raise RuntimeError(
+                    f"Operation {info.name!r} references missing inverse "
+                    f"{info.inverse_op!r}."
+                )
 
             if meta.side == "SP" and info.partition == "null":
                 raise PermissionError(
@@ -1844,7 +1851,14 @@ def SP_generate(
             continue
 
         if ST is not None:
-            ST.sync(SP_meta)
+            ST.register_generation(
+                SP_meta,
+                source_gidx=int(source_idx),
+                generated_gidxs=new_indices,
+                partition=info.partition,
+                inverse_op=info.inverse_op,
+                op_name=info.name,
+            )
 
         return new_indices
 
