@@ -134,6 +134,7 @@ class ProgramMeta:
     source: list[SourceRef] = field(default_factory=list)
     op: list[str] = field(default_factory=list)
     dims: list[int] = field(default_factory=list)
+    params: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.side not in {"GP", "SP"}:
@@ -142,7 +143,14 @@ class ProgramMeta:
     def __len__(self) -> int:
         return len(self.op)
 
-    def append(self, *, source: Any, op: str, dims: int) -> int:
+    def append(
+        self,
+        *,
+        source: Any,
+        op: str,
+        dims: int,
+        params: dict[str, Any] | None = None,
+    ) -> int:
         """Append metadata and return the newly allocated gene index."""
         dims = int(dims)
         if dims < 0:
@@ -153,6 +161,7 @@ class ProgramMeta:
         self.source.append(source)
         self.op.append(str(op))
         self.dims.append(dims)
+        self.params.append(dict(params or {}))
 
         return len(self.op) - 1
 
@@ -162,6 +171,7 @@ class ProgramMeta:
             "source": self.source[gidx],
             "op": self.op[gidx],
             "dims": self.dims[gidx],
+            "params": dict(self.params[gidx]),
         }
 
     def rows(self) -> list[dict[str, Any]]:

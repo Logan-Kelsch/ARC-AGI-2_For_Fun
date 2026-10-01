@@ -7,11 +7,18 @@ from .environment import (
     source_indices,
 )
 from .ops import (
+    GP_generate,
     OP_REGISTRY,
+    SP_generate,
     OperationInfo,
+    generation_exists,
+    generation_invalid_reason,
+    gene_atomic_dtypes,
     operation,
     partition_composite,
     partition_shape,
+    sample_operation_params,
+    valid_generation,
 )
 """Notebook-local analytical operation library."""
 
@@ -55,6 +62,13 @@ __all__ = [
     "OP_REGISTRY",
     "OperationInfo",
     "operation",
+    "valid_generation",
+    "generation_invalid_reason",
+    "generation_exists",
+    "gene_atomic_dtypes",
+    "sample_operation_params",
+    "GP_generate",
+    "SP_generate",
     "partition_shape",
     "partition_composite",
     "DEFAULT_ABS_KERNELS",

@@ -283,3 +283,177 @@ The next evaluation layer can therefore operate on a much simpler invariant:
 
 > Find GP genes whose instantiated values exactly equal an SP gene across every
 > training sample, then record the GP gene index in the corresponding ST node.
+
+
+## Random program generation
+
+The environment now supports constrained random expansion of GP and SP.
+
+### valid_generation
+
+~~~python
+valid_generation(
+    meta,
+    X,
+    operation,
+    source_idx,
+    params={...},
+)
+~~~
+
+checks a candidate transformation before it is instantiated.
+
+The current checks are:
+
+1. metadata and X belong to the same side and remain gene-parallel;
+2. the source gene exists;
+3. SP may only use operations marked full_partition;
+4. the source satisfies the operation's dimensionality restriction;
+5. the source satisfies the operation's atomic dtype restriction;
+6. any operation-specific validator accepts the candidate;
+7. the exact transformation signature has not already been used.
+
+The exact transformation signature is:
+
+~~~text
+(operation, source gene index, exact parameters)
+~~~
+
+For multi-output operations, every output gene records the same signature.
+
+ProgramMeta therefore now also retains:
+
+~~~python
+meta.params[gidx]
+~~~
+
+alongside source, op, and dims.
+
+### Operation generation metadata
+
+The operation decorator supports reusable search constraints:
+
+~~~python
+@operation(
+    full_partition=True,
+    output_count=1,
+    min_dims_exclusive=0,
+    atomic_dtypes=(np.int64,),
+    parameter_sampler=...,
+    validator=...,
+)
+~~~
+
+The initial operations are configured as follows.
+
+partition_shape:
+
+~~~text
+source dims > 0
+dtype unrestricted
+~~~
+
+partition_composite:
+
+~~~text
+source dims > 1
+atomic dtype == int64
+~~~
+
+Parameter samplers are currently unused by the initial two operations, but the
+registry supports them for future integer/axis/kernel/etc. parameters.
+
+### Atomic dtype
+
+Generation restrictions use the atomic dtype of instantiated source values, not
+the dtype of the outer object array used by ProgramX.
+
+For example:
+
+~~~text
+2D np.int64 grid        -> atomic dtype int64
+3D boolean mask stack   -> atomic dtype bool
+1D float vector         -> atomic dtype float64
+~~~
+
+For nested object structures, atomic dtypes are collected recursively across all
+samples.
+
+### GP_generate
+
+~~~python
+new_gidx = GP_generate(
+    GP_meta,
+    GP_X,
+    n_new_genes=20,
+    rng=0,
+)
+~~~
+
+GP_generate repeatedly:
+
+~~~text
+random registered operation
+        +
+random existing GP gene
+        +
+random operation parameters
+        |
+        v
+valid_generation
+        |
+        v
+instantiate operation
+~~~
+
+until the requested gene budget is filled or no valid generation remains.
+
+The requested count is a gene-count budget, not an operation-count budget.
+Therefore a two-output operation is only eligible when at least two gene slots
+remain.
+
+The returned list contains the newly created GP gene indices.
+
+### SP_generate
+
+~~~python
+new_sp_gidx = SP_generate(
+    SP_meta,
+    SP_X,
+    ST,
+    rng=0,
+)
+~~~
+
+SP_generate performs one random valid SP operation application.
+
+Because SP only accepts full partitions, its candidate pool is automatically
+restricted to full_partition operations.
+
+One SP generation step may add multiple genes when the chosen operation has
+multiple outputs.
+
+If ST is supplied, it is automatically synchronized after SP grows.
+
+### Duplicate prevention
+
+Suppose the metadata already contains:
+
+~~~text
+op      = translate
+source  = 7
+params  = {"dx": 2, "dy": -1}
+~~~
+
+then that exact transition cannot be generated again.
+
+However these remain distinct candidates:
+
+~~~text
+translate(source=7, dx=3, dy=-1)
+translate(source=8, dx=2, dy=-1)
+rotate(source=7, ...)
+~~~
+
+This allows the operation library to grow substantially without relying on
+special-case duplicate rules for individual transformations.
