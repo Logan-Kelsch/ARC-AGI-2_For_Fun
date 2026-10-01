@@ -6,8 +6,15 @@ import pytest
 from notebooks.ops.environment import (
     ProgramMeta,
     ProgramX,
+    STInverseRef,
+    STNodeRef,
+    STSet,
     SolutionTree,
     init_env,
+)
+from notebooks.ops.inv_ops import (
+    INV_OP_REGISTRY,
+    inverse_operation,
 )
 from notebooks.ops.ops import (
     GP_generate,
@@ -283,16 +290,22 @@ def test_partition_composite_dynamic_output_count_matches_color_union():
     ) == 6
 
 
-def test_default_partition_ops_are_marked_full_partition():
-    assert partition_shape.full_partition is True
-    assert partition_composite.full_partition is True
+def test_default_partition_ops_are_and_partitions_with_inverses():
+    assert partition_shape.partition == "and"
+    assert partition_composite.partition == "and"
 
-    assert OP_REGISTRY["partition_shape"].full_partition is True
-    assert OP_REGISTRY["partition_composite"].full_partition is True
+    assert OP_REGISTRY["partition_shape"].partition == "and"
+    assert OP_REGISTRY["partition_shape"].inverse_op == "inv_partition_shape"
+
+    assert OP_REGISTRY["partition_composite"].partition == "and"
+    assert (
+        OP_REGISTRY["partition_composite"].inverse_op
+        == "inv_partition_composite"
+    )
 
 
-def test_non_full_partition_operation_is_allowed_on_gp_but_rejected_on_sp():
-    @operation(full_partition=False, output_count=1)
+def test_null_partition_operation_is_allowed_on_gp_but_rejected_on_sp():
+    @operation(partition="null", output_count=1)
     def test_nonpartition(meta, X, source_idx):
         values = [
             np.asarray(value).copy()
@@ -318,7 +331,7 @@ def test_non_full_partition_operation_is_allowed_on_gp_but_rejected_on_sp():
 
     assert test_nonpartition(gp_meta, gp_x, 0) == 1
 
-    with pytest.raises(PermissionError, match="not full_partition"):
+    with pytest.raises(PermissionError, match="NULL partition"):
         test_nonpartition(sp_meta, sp_x, 0)
 
     assert len(sp_meta) == 1
@@ -327,47 +340,89 @@ def test_non_full_partition_operation_is_allowed_on_gp_but_rejected_on_sp():
     OP_REGISTRY.pop("test_nonpartition", None)
 
 
-def test_solution_tree_is_derived_from_sp_structure_and_starts_unsolved():
+def test_solution_tree_initializes_as_root_shape_and_composite_boolean_proof():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     assert ST.roots == (0,)
-    assert len(ST) == 8
 
-    assert ST[0].parents == ()
-    assert ST[0].children == [1, 2, 3, 4, 5, 6, 7]
+    # Eight concrete SP genes plus one logical composite node.
+    assert len(ST) == 9
+    assert "composite" in ST.nodes
 
-    assert ST[1].parents == (0,)
-    for sp_gidx in range(2, 8):
-        assert ST[sp_gidx].parents == (0,)
+    assert ST[0].label == "root"
+    assert ST[1].label == "shape"
+    assert ST["composite"].sp_gidx is None
 
-    assert ST[0].op == "raw_output"
-    assert ST[1].op == "partition_shape"
-    for sp_gidx in range(2, 8):
-        assert ST[sp_gidx].op == "partition_composite"
+    assert isinstance(ST[0].derivation, STSet)
+    assert ST[0].derivation.mode == "OR"
 
-    assert [ST[i].dims for i in range(8)] == [2, 1, 0, 2, 0, 2, 0, 2]
-    assert all(ST[i].gp_gidx == -1 for i in range(8))
-    assert all(not ST[i].solved for i in range(8))
+    root_branch = ST[0].derivation.members[0]
+    assert isinstance(root_branch, STSet)
+    assert root_branch.mode == "AND"
+    assert root_branch.partition == "and"
+
+    assert isinstance(root_branch.members[0], STInverseRef)
+    assert root_branch.members[0].inverse_op == "inv_partition_shape"
+    assert root_branch.members[1] == STNodeRef(1)
+    assert root_branch.members[2] == STNodeRef("composite")
+
+    composite_or = ST["composite"].derivation
+    assert isinstance(composite_or, STSet)
+    assert composite_or.mode == "OR"
+
+    composite_branch = composite_or.members[0]
+    assert isinstance(composite_branch, STSet)
+    assert composite_branch.mode == "AND"
+    assert composite_branch.partition == "and"
+    assert composite_branch.members[0] == STInverseRef(
+        "inv_partition_composite"
+    )
+
+    assert composite_branch.members[1:] == [
+        STNodeRef(gidx)
+        for gidx in range(2, 8)
+    ]
+
+    assert not ST.solved
+    assert ST.unresolved_leaf_nodes() == tuple(range(1, 8))
 
 
-def test_solution_tree_can_record_gp_gene_that_solves_sp_gene():
+def test_solution_tree_boolean_and_requires_every_initial_leaf():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    for gidx in range(1, 7):
+        ST.mark_solution(gidx, 100 + gidx)
+
+    assert not ST.is_solved("composite")
+    assert not ST.is_solved(0)
+
+    ST.mark_solution(7, 107)
+
+    assert ST.is_solved("composite")
+    assert ST.is_solved(0)
+    assert ST.solved
+
+
+def test_solution_tree_can_record_and_clear_direct_gp_solution():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     ST.mark_solution(sp_gidx=1, gp_gidx=7)
 
     assert ST[1].gp_gidx == 7
-    assert ST[1].solved
-    assert ST[0].gp_gidx == -1
+    assert ST.is_solved(1)
+    assert ST.needs_gp_solution(1) is False
 
     ST.clear_solution(1)
 
     assert ST[1].gp_gidx == -1
-    assert not ST[1].solved
+    assert not ST.is_solved(1)
+    assert ST.needs_gp_solution(1)
 
 
-def test_solution_tree_sync_preserves_existing_matches():
+def test_solution_tree_sync_preserves_boolean_structure_and_matches():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
+    original_root_derivation = ST[0].derivation
     ST.mark_solution(1, 5)
 
     new_gidx = partition_shape(SP_meta, SP_X, 1)
@@ -375,10 +430,83 @@ def test_solution_tree_sync_preserves_existing_matches():
 
     ST.sync(SP_meta)
 
-    assert len(ST) == 9
+    assert len(ST) == 10
     assert ST[1].gp_gidx == 5
-    assert ST[8].parents == (1,)
+    assert ST[8].source == 1
     assert ST[8].gp_gidx == -1
+    assert ST[0].derivation is original_root_derivation
+
+
+def test_or_partition_adds_inverse_and_transformed_alternative():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    source_gidx = 3
+    transformed_gidx = mat2_cwrotate(SP_meta, SP_X, source_gidx)
+
+    ST.register_generation(
+        SP_meta,
+        source_gidx=source_gidx,
+        generated_gidxs=(transformed_gidx,),
+        partition="or",
+        inverse_op="inv_mat2_cwrotate",
+        op_name="mat2_cwrotate",
+    )
+
+    assert not ST.is_solved(source_gidx)
+
+    derivation = ST[source_gidx].derivation
+    assert isinstance(derivation, STSet)
+    assert derivation.mode == "OR"
+
+    branch = derivation.members[-1]
+    assert isinstance(branch, STSet)
+    assert branch.mode == "AND"
+    assert branch.partition == "or"
+    assert branch.members == [
+        STInverseRef("inv_mat2_cwrotate"),
+        STNodeRef(transformed_gidx),
+    ]
+
+    # The source itself remains unsolved, but solving the transformed
+    # representation is enough because the inverse operation is innate.
+    ST.mark_solution(transformed_gidx, 55)
+
+    assert ST[source_gidx].gp_gidx == -1
+    assert ST.is_solved(source_gidx)
+
+
+def test_user_example_shape_and_rotated_composite_path_solves_root():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    # Shape is solved directly.
+    ST.mark_solution(1, 10)
+
+    # Solve all composite leaves except one mask.
+    for gidx in (2, 4, 5, 6, 7):
+        ST.mark_solution(gidx, 100 + gidx)
+
+    unresolved_mask = 3
+    rotated = mat2_cwrotate(
+        SP_meta,
+        SP_X,
+        unresolved_mask,
+    )
+    ST.register_generation(
+        SP_meta,
+        source_gidx=unresolved_mask,
+        generated_gidxs=(rotated,),
+        partition="or",
+        inverse_op="inv_mat2_cwrotate",
+        op_name="mat2_cwrotate",
+    )
+    ST.mark_solution(rotated, 99)
+
+    assert ST[unresolved_mask].gp_gidx == -1
+    assert ST.is_solved(unresolved_mask)
+    assert ST.is_solved("composite")
+    assert ST.is_solved(0)
+    assert ST.solved
+
 
 
 def test_program_meta_rows_and_program_x_object_matrix_are_easy_to_inspect():
@@ -503,7 +631,7 @@ def test_valid_generation_partition_composite_requires_dims_gt_one_and_int64():
 
 def test_exact_transition_duplicate_includes_operation_source_and_params():
     @operation(
-        full_partition=False,
+        partition="null",
         output_count=1,
         min_dims_exclusive=0,
     )
@@ -588,7 +716,7 @@ def test_gp_generate_zero_is_noop():
     assert len(GP_X) == 8
 
 
-def test_sp_generate_runs_one_full_partition_step_and_syncs_st():
+def test_sp_generate_runs_one_reversible_step_and_updates_st():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     before = len(SP_X)
@@ -598,20 +726,26 @@ def test_sp_generate_runs_one_full_partition_step_and_syncs_st():
         SP_X,
         ST,
         rng=11,
-        operation_names=("partition_shape", "partition_composite"),
+        operation_names=("mat2_cwrotate",),
     )
 
-    assert len(new_gidx) >= 1
-    assert len(SP_X) == before + len(new_gidx)
+    assert len(new_gidx) == 1
+    assert len(SP_X) == before + 1
     assert len(SP_meta) == len(SP_X)
-    assert len(ST) == len(SP_X)
 
-    for gidx in new_gidx:
-        assert OP_REGISTRY[SP_meta.op[gidx]].full_partition
-        assert ST[gidx].gp_gidx == -1
+    # ST also contains the logical composite node.
+    assert len(ST) == len(SP_X) + 1
+
+    gidx = new_gidx[0]
+    assert OP_REGISTRY[SP_meta.op[gidx]].partition == "or"
+    assert ST[gidx].gp_gidx == -1
+
+    source = SP_meta.source[gidx]
+    assert ST[source].derivation is not None
+    assert ST[source].derivation.mode == "OR"
 
 
-def test_sp_generate_returns_empty_when_no_registered_full_partition_is_valid():
+def test_sp_generate_returns_empty_when_no_reversible_partition_is_valid():
     meta = ProgramMeta(side="SP")
     X = ProgramX(side="SP", sample_count=1)
 
@@ -633,7 +767,7 @@ def test_parameter_sampler_supports_future_integer_parameter_ops():
         return {"k": int(rng.integers(1, 1000))}
 
     @operation(
-        full_partition=False,
+        partition="null",
         output_count=1,
         min_dims_exclusive=0,
         parameter_sampler=sample_k,
@@ -713,7 +847,7 @@ def test_equivalent_gene_idx_requires_exact_shape_dtype_and_contents():
 
 def test_duplicate_output_operation_is_rolled_back_and_space_exhausts(capsys):
     @operation(
-        full_partition=False,
+        partition="null",
         output_count=1,
         min_dims_exclusive=-1,
     )
@@ -759,7 +893,7 @@ def test_duplicate_output_operation_is_rolled_back_and_space_exhausts(capsys):
 
 def test_multi_output_operation_rolls_back_if_any_output_duplicates(capsys):
     @operation(
-        full_partition=False,
+        partition="null",
         output_count=2,
         min_dims_exclusive=-1,
     )
@@ -813,8 +947,13 @@ def test_multi_output_operation_rolls_back_if_any_output_duplicates(capsys):
 
 
 def test_sp_generation_rolls_back_duplicate_data_and_reports_exhaustion(capsys):
+    @inverse_operation("test_sp_identity")
+    def inv_test_sp_identity(value):
+        return np.asarray(value).copy()
+
     @operation(
-        full_partition=True,
+        partition="or",
+        inverse_op="inv_test_sp_identity",
         output_count=1,
         min_dims_exclusive=-1,
     )
@@ -856,6 +995,7 @@ def test_sp_generation_rolls_back_duplicate_data_and_reports_exhaustion(capsys):
     )
 
     OP_REGISTRY.pop("test_sp_identity", None)
+    INV_OP_REGISTRY.pop("inv_test_sp_identity", None)
 
 
 
@@ -1170,23 +1310,21 @@ def test_partition_bool_trim_all_false_returns_empty_nd_structure():
     assert X[data_gidx, 0].dtype == bool
 
 
-def test_only_partition_bool_trim_is_sp_legal_among_new_ops():
-    full_partition_names = {
-        name
-        for name in (
-            "bool_complement",
-            "bool2_union",
-            "bool2_intersect",
-            "mat2_cwrotate",
-            "dim0_flip",
-            "dim1_flip",
-            "dim2_flip",
-            "partition_bool_trim",
-        )
-        if OP_REGISTRY[name].full_partition
-    }
+def test_operation_partition_categories():
+    assert OP_REGISTRY["bool_complement"].partition == "or"
+    assert OP_REGISTRY["mat2_cwrotate"].partition == "or"
+    assert OP_REGISTRY["dim0_flip"].partition == "or"
+    assert OP_REGISTRY["dim1_flip"].partition == "or"
+    assert OP_REGISTRY["dim2_flip"].partition == "or"
 
-    assert full_partition_names == {"partition_bool_trim"}
+    assert OP_REGISTRY["partition_bool_trim"].partition == "and"
+
+    assert OP_REGISTRY["bool2_union"].partition == "null"
+    assert OP_REGISTRY["bool2_intersect"].partition == "null"
+    assert OP_REGISTRY["bool_sum"].partition == "null"
+    assert OP_REGISTRY["bool_cavity"].partition == "null"
+
+
 
 
 def test_gp_generate_can_discover_binary_boolean_operation():
@@ -1426,6 +1564,6 @@ def test_bool_cavity_accepts_scalar_true_and_returns_scalar_false():
     assert bool(X[gidx, 0]) is False
 
 
-def test_bool_sum_and_cavity_are_gp_only():
-    assert OP_REGISTRY["bool_sum"].full_partition is False
-    assert OP_REGISTRY["bool_cavity"].full_partition is False
+def test_bool_sum_and_cavity_are_null_partition_gp_only():
+    assert OP_REGISTRY["bool_sum"].partition == "null"
+    assert OP_REGISTRY["bool_cavity"].partition == "null"

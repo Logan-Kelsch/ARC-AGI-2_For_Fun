@@ -8,6 +8,7 @@ from typing import Any, Callable, Iterable
 
 import numpy as np
 
+from .inv_ops import INV_OP_REGISTRY
 from .environment import (
     ProgramMeta,
     ProgramX,
@@ -49,7 +50,8 @@ class OperationInfo:
     """
 
     name: str
-    full_partition: bool
+    partition: str
+    inverse_op: str | None
     output_count: int | None
     output_count_estimator: OutputCountEstimator | None = None
     source_count: int = 1
@@ -75,7 +77,8 @@ def _normalize_dtypes(
 
 def operation(
     *,
-    full_partition: bool,
+    partition: str = "null",
+    inverse_op: str | None = None,
     output_count: int | None,
     output_count_estimator: OutputCountEstimator | None = None,
     source_count: int = 1,
@@ -90,11 +93,20 @@ def operation(
 
     GP may use any registered operation.
 
-    SP may only use operations explicitly marked full_partition=True.
+    SP may use reversible AND/OR partition operations. NULL operations are
+    excluded from SP generation.
 
     The decorator also validates every direct operation application, so manual
     notebook calls and random generation obey the same rules.
     """
+    partition = str(partition).lower()
+    if partition not in {"and", "or", "null"}:
+        raise ValueError("partition must be 'and', 'or', or 'null'.")
+    if partition in {"and", "or"} and not inverse_op:
+        raise ValueError(
+            "AND/OR partition operations require an inverse_op name."
+        )
+
     if output_count is None and output_count_estimator is None:
         raise ValueError(
             "Dynamic-output operations require output_count_estimator."
@@ -117,7 +129,8 @@ def operation(
     def decorator(func: Callable):
         info = OperationInfo(
             name=func.__name__,
-            full_partition=bool(full_partition),
+            partition=partition,
+            inverse_op=inverse_op,
             output_count=(
                 None if output_count is None else int(output_count)
             ),
@@ -146,10 +159,16 @@ def operation(
                 if name not in {"meta", "X", "source_idx"}
             }
 
-            if meta.side == "SP" and not info.full_partition:
+            if info.inverse_op and info.inverse_op not in INV_OP_REGISTRY:
+                raise RuntimeError(
+                    f"Operation {info.name!r} references missing inverse "
+                    f"{info.inverse_op!r}."
+                )
+
+            if meta.side == "SP" and info.partition == "null":
                 raise PermissionError(
-                    f"Operation {info.name!r} is not full_partition and "
-                    "cannot be applied to SP."
+                    f"Operation {info.name!r} has NULL partition semantics "
+                    "and cannot be applied to SP."
                 )
 
             reason = generation_invalid_reason(
@@ -207,7 +226,8 @@ def operation(
         info.func = wrapped
 
         wrapped.operation_info = info
-        wrapped.full_partition = info.full_partition
+        wrapped.partition = info.partition
+        wrapped.inverse_op = info.inverse_op
         wrapped.output_count = info.output_count
 
         OP_REGISTRY[info.name] = info
@@ -545,8 +565,8 @@ def generation_invalid_reason(
         if index < 0 or index >= len(X):
             return f"source index {index} is outside the current gene range"
 
-    if meta.side == "SP" and not info.full_partition:
-        return "SP may only use full_partition operations"
+    if meta.side == "SP" and info.partition == "null":
+        return "SP may not use NULL partition operations"
 
     for index in source_tuple:
         source_dims = meta.dims[index]
@@ -923,7 +943,8 @@ def _partition_composite_output_count(
 
 
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_partition_shape",
     output_count=1,
     min_dims_exclusive=0,
 )
@@ -950,7 +971,8 @@ def partition_shape(
 
 
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_partition_composite",
     output_count=None,
     output_count_estimator=_partition_composite_output_count,
     min_dims_exclusive=1,
@@ -1011,7 +1033,8 @@ def partition_composite(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool_sum",
     output_count=1,
     atomic_dtypes=(np.bool_,),
 )
@@ -1038,7 +1061,8 @@ def bool_sum(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool_cavity",
     output_count=1,
     atomic_dtypes=(np.bool_,),
     validator=_bool_has_true_validator,
@@ -1066,7 +1090,8 @@ def bool_cavity(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_bool_complement",
     output_count=1,
     atomic_dtypes=(np.bool_,),
 )
@@ -1093,7 +1118,8 @@ def bool_complement(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool2_union",
     output_count=1,
     source_count=2,
     ordered_sources=False,
@@ -1134,7 +1160,8 @@ def bool2_union(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool2_intersect",
     output_count=1,
     source_count=2,
     ordered_sources=False,
@@ -1175,7 +1202,8 @@ def bool2_intersect(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_mat2_cwrotate",
     output_count=1,
     allowed_dims=(2,),
 )
@@ -1202,7 +1230,8 @@ def mat2_cwrotate(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_dim0_flip",
     output_count=1,
     min_dims_exclusive=0,
 )
@@ -1229,7 +1258,8 @@ def dim0_flip(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_dim1_flip",
     output_count=1,
     min_dims_exclusive=1,
 )
@@ -1256,7 +1286,8 @@ def dim1_flip(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_dim2_flip",
     output_count=1,
     min_dims_exclusive=2,
 )
@@ -1283,7 +1314,8 @@ def dim2_flip(
 
 
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_partition_bool_trim",
     output_count=2,
     min_dims_exclusive=0,
     atomic_dtypes=(np.bool_,),
@@ -1349,7 +1381,7 @@ def _eligible_operation_infos(
         for info in OP_REGISTRY.values()
         if info.func is not None
         and (allowed_names is None or info.name in allowed_names)
-        and (side != "SP" or info.full_partition)
+        and (side != "SP" or info.partition != "null")
     ]
     return infos
 
@@ -1819,7 +1851,14 @@ def SP_generate(
             continue
 
         if ST is not None:
-            ST.sync(SP_meta)
+            ST.register_generation(
+                SP_meta,
+                source_gidx=int(source_idx),
+                generated_gidxs=new_indices,
+                partition=info.partition,
+                inverse_op=info.inverse_op,
+                op_name=info.name,
+            )
 
         return new_indices
 
@@ -1858,7 +1897,14 @@ def SP_generate(
                 continue
 
             if ST is not None:
-                ST.sync(SP_meta)
+                ST.register_generation(
+                    SP_meta,
+                    source_gidx=int(source_idx),
+                    generated_gidxs=new_indices,
+                    partition=info.partition,
+                    inverse_op=info.inverse_op,
+                    op_name=info.name,
+                )
 
             return new_indices
 

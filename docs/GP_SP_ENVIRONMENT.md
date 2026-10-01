@@ -78,10 +78,15 @@ known training outputs.
 
 SP is constrained more strictly than GP:
 
-> SP may only use operations registered with full_partition=True.
+SP operations are classified by partition semantics:
 
-This ensures SP is a decomposition of the complete output representation rather
-than an arbitrary feature search.
+~~~text
+and   child outputs are jointly required to reconstruct/validate the parent
+or    a reversible transformed representation is an alternative way to solve it
+null  not a valid SP proof transformation
+~~~
+
+SP may use only AND/OR operations. NULL operations remain GP-only.
 
 ## 4. SP_X
 
@@ -126,9 +131,9 @@ When a GP gene exactly represents an SP gene, ST can record:
 ST.mark_solution(sp_gidx, gp_gidx)
 ~~~
 
-ST is derived from SP dependencies rather than from a separately hand-written
-loss hierarchy. As SP grows through full-partition operations, ST can be synced
-from SP_meta.
+ST is a Boolean proof structure over SP targets rather than a simple dependency
+tree. It records direct GP matches plus nested AND/OR alternatives created by
+reversible SP transformations.
 
 ## Registered operations
 
@@ -150,17 +155,15 @@ The operation layer checks that meta and X belong to the same side.
 Every registered operation declares:
 
 ~~~text
-full_partition
+partition = "and" | "or" | "null"
+inverse_op
 output_count
 ~~~
 
 GP may use any registered transformation.
 
-SP may only use operations marked:
-
-~~~text
-full_partition = True
-~~~
+SP may use only AND/OR operations. NULL operations are excluded because their
+result does not provide a valid reversible proof of the source.
 
 ## Initial operations
 
@@ -228,7 +231,7 @@ partition_composite is a dynamic-output operation:
 output_count = 2 * number of distinct colors across all samples
 ~~~
 
-Both initial operations are full partitions and are therefore legal on SP.
+Both initial operations are AND partitions and are legal on SP.
 
 ## init_env
 
@@ -325,7 +328,7 @@ The current checks are:
 
 1. metadata and X belong to the same side and remain gene-parallel;
 2. the source gene exists;
-3. SP may only use operations marked full_partition;
+3. SP may only use AND/OR partition operations;
 4. the source satisfies the operation's dimensionality restriction;
 5. the source satisfies the operation's atomic dtype restriction;
 6. any operation-specific validator accepts the candidate;
@@ -353,7 +356,8 @@ The operation decorator supports reusable search constraints:
 
 ~~~python
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_example",
     output_count=1,
     min_dims_exclusive=0,
     atomic_dtypes=(np.int64,),
@@ -446,8 +450,8 @@ new_sp_gidx = SP_generate(
 
 SP_generate performs one random valid SP operation application.
 
-Because SP only accepts full partitions, its candidate pool is automatically
-restricted to full_partition operations.
+SP generation automatically excludes NULL operations and may sample reversible
+AND/OR transformations.
 
 One SP generation step may add multiple genes when the chosen operation has
 multiple outputs.
@@ -610,7 +614,7 @@ in addition to the existing dims > N rule.
 source_count: 1
 dtype: bool
 dims: any
-full_partition: False
+partition: null/or as appropriate
 ~~~
 
 Computes the boolean complement of the complete source tensor while preserving
@@ -624,7 +628,7 @@ dtype: bool for both sources
 shape: identical per sample
 dims: any
 sources: unordered / commutative
-full_partition: False
+partition: null/or as appropriate
 ~~~
 
 Computes elementwise logical OR.
@@ -639,7 +643,7 @@ Same constraints as bool2_union, but computes elementwise logical AND.
 source_count: 1
 dims: exactly 2
 dtype: unrestricted
-full_partition: False
+partition: null/or as appropriate
 ~~~
 
 Rotates each instantiated matrix clockwise by 90 degrees.
@@ -677,7 +681,7 @@ Reverses values along axis 2.
 source_count: 1
 dtype: bool
 dims > 0
-full_partition: True
+partition: and
 output_count: 2
 ~~~
 
@@ -718,9 +722,9 @@ and:
 For an all-False source, the offset is all zeros and the remaining structure is
 empty along every dimension.
 
-Because partition_bool_trim is marked full_partition=True, it is the only one
-of this new operation group that SP_generate may use. The boolean set
-operations, rotations, and flips remain GP-only transformations.
+partition_bool_trim is an AND partition. Reversible unary transforms such as
+rotation and flips are OR partitions and are also SP-legal. Multi-source
+boolean set operations remain NULL/GP-only.
 
 
 ## bool_sum
@@ -729,7 +733,7 @@ operations, rotations, and flips remain GP-only transformations.
 source_count: 1
 dtype: bool
 dims: any
-full_partition: False
+partition: null/or as appropriate
 output dims: 0
 ~~~
 
@@ -754,7 +758,7 @@ source_count: 1
 dtype: bool
 dims: any
 requires: at least one True in every sample
-full_partition: False
+partition: null/or as appropriate
 output shape: identical to source
 ~~~
 
@@ -814,3 +818,117 @@ A scalar True is valid and produces scalar False. A source sample containing no
 True values is not generation-valid for bool_cavity.
 
 The operation is GP-only.
+
+
+## Boolean Solution Tree
+
+ST now represents a proof that the complete output can be reconstructed.
+
+Every semantic ST node has two ways to become solved:
+
+1. direct: an exact GP gene is attached through gp_gidx;
+2. derived: one of its Boolean derivation branches evaluates True.
+
+The initial environment is centered on:
+
+~~~text
+root
+  =
+shape
+  AND
+composite
+~~~
+
+Composite is itself:
+
+~~~text
+inv_partition_composite
+AND color_0_id
+AND color_0_presence
+AND color_1_id
+AND color_1_presence
+AND ...
+~~~
+
+The inverse-operation requirements are innate: the transformation code is part
+of the grammar and does not need to be discovered by GP.
+
+### OR transformations
+
+A reversible transform creates an alternative path instead of replacing the
+original target.
+
+If a composite child C is rotated clockwise into R:
+
+~~~text
+C
+OR
+(
+    inv_mat2_cwrotate
+    AND R
+)
+~~~
+
+The direct C target may remain unsolved. If R is solved by a GP gene, the known
+inverse makes C logically solved.
+
+This propagates upward through the Boolean tree.
+
+For example:
+
+~~~text
+shape: solved
+AND
+(
+    composite leaf C: unsolved directly
+    OR
+    (
+        inverse rotate: innately solved
+        AND rotated C: solved
+    )
+)
+~~~
+
+is sufficient to solve the relevant composite branch and therefore the root.
+
+### Partition classes
+
+AND
+: A decomposition whose required outputs are jointly used to explain the
+  source. partition_shape and partition_composite are the initial examples.
+
+OR
+: A reversible alternate representation of one source. bool_complement,
+  mat2_cwrotate, and axis flips are examples.
+
+NULL
+: A transformation that does not create a valid reversible single-source proof
+  branch. Multi-source bool2_union/intersect are NULL. Information-losing
+  bool_sum/bool_cavity are also NULL so ST cannot falsely infer their source
+  from insufficient information.
+
+### Inverse operations
+
+Reverse functions live in:
+
+~~~text
+notebooks/ops/inv_ops.py
+~~~
+
+and are registered in INV_OP_REGISTRY.
+
+Important examples:
+
+~~~python
+inv_partition_shape(shape, composite)
+inv_partition_composite(color0, mask0, color1, mask1, ...)
+inv_bool_complement(value)
+inv_mat2_cwrotate(value)
+inv_dim0_flip(value)
+inv_dim1_flip(value)
+inv_dim2_flip(value)
+~~~
+
+NULL operations also have relation-checking inverse helpers for completeness,
+but those inverses are marked non-reconstructive and are never used by ST as
+solution branches.

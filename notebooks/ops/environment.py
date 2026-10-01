@@ -246,115 +246,451 @@ class ProgramX:
         return result
 
 
-@dataclass
-class STNode:
-    """One SP gene represented in the solution tree."""
+STNodeId = int | str
 
-    sp_gidx: int
-    op: str
-    dims: int
-    parents: tuple[int, ...]
-    children: list[int] = field(default_factory=list)
-    gp_gidx: int = -1
+
+@dataclass(frozen=True)
+class STNodeRef:
+    """Reference to another solution-tree node."""
+
+    node_id: STNodeId
+
+
+@dataclass(frozen=True)
+class STInverseRef:
+    """Known inverse transformation required by one proof branch."""
+
+    inverse_op: str
 
     @property
     def solved(self) -> bool:
-        return self.gp_gidx >= 0
+        # The inverse function is part of the grammar, so knowing/possessing it
+        # is not itself something GP must discover.
+        return True
+
+
+@dataclass
+class STSet:
+    """Boolean requirement set used to resolve one ST node."""
+
+    mode: str
+    members: list[Any] = field(default_factory=list)
+    label: str = ""
+    partition: str | None = None
+
+    def __post_init__(self) -> None:
+        self.mode = str(self.mode).upper()
+        if self.mode not in {"AND", "OR"}:
+            raise ValueError("STSet.mode must be 'AND' or 'OR'.")
+
+
+@dataclass
+class STNode:
+    """One semantic target represented in the boolean solution tree."""
+
+    node_id: STNodeId
+    label: str
+    sp_gidx: int | None = None
+    op: str = ""
+    dims: int | None = None
+    source: SourceRef | None = None
+    gp_gidx: int = -1
+    derivation: STSet | None = None
+    innate: bool = False
+
+    @property
+    def directly_solved(self) -> bool:
+        return self.innate or self.gp_gidx >= 0
 
 
 @dataclass
 class SolutionTree:
-    """Structural view of SP with GP solution indices attached.
+    """Boolean proof tree describing how SP structure can resolve the output.
 
-    Each SP gene has one ST node. gp_gidx == -1 means the SP node is not yet
-    explained by an exact GP gene across all samples.
+    Every semantic node may be solved directly by a matching GP gene, or by one
+    of its alternative derivation branches.
 
-    SP is currently expected to be tree-like because full-partition operations
-    decompose prior SP genes. The representation also retains multiple parents
-    so future full-partition operations may be multi-source without losing
-    dependency information.
+    A derivation branch is expressed with STSet:
+
+        AND(...)  every member is required
+        OR(...)   any member is sufficient
+
+    Reversible SP transformations add an alternative AND branch containing the
+    known inverse operation and the transformed child node(s). The parent's
+    direct GP solution remains an implicit OR alternative.
+
+    Nodes created only to organize solution structure may have sp_gidx=None.
     """
 
-    nodes: dict[int, STNode] = field(default_factory=dict)
-    roots: tuple[int, ...] = ()
+    nodes: dict[STNodeId, STNode] = field(default_factory=dict)
+    roots: tuple[STNodeId, ...] = (0,)
 
     @classmethod
     def from_sp_meta(cls, SP_meta: ProgramMeta) -> "SolutionTree":
         if SP_meta.side != "SP":
             raise ValueError("SolutionTree must be built from SP_meta.")
 
-        nodes: dict[int, STNode] = {}
+        tree = cls(nodes={}, roots=(0,) if len(SP_meta) else ())
 
         for gidx in range(len(SP_meta)):
-            parents = source_indices(SP_meta.source[gidx])
-            nodes[gidx] = STNode(
+            tree.nodes[gidx] = STNode(
+                node_id=gidx,
+                label=(
+                    "root"
+                    if gidx == 0
+                    else f"sp_{gidx}:{SP_meta.op[gidx]}"
+                ),
                 sp_gidx=gidx,
                 op=SP_meta.op[gidx],
                 dims=SP_meta.dims[gidx],
-                parents=parents,
+                source=SP_meta.source[gidx],
             )
 
-        for gidx, node in nodes.items():
-            for parent in node.parents:
-                if parent not in nodes:
-                    raise IndexError(
-                        f"SP gene {gidx} references missing source gene {parent}."
-                    )
-                nodes[parent].children.append(gidx)
-
-        roots = tuple(
-            gidx
-            for gidx, node in nodes.items()
-            if not node.parents
-        )
-
-        return cls(nodes=nodes, roots=roots)
+        return tree
 
     def __len__(self) -> int:
         return len(self.nodes)
 
-    def __getitem__(self, sp_gidx: int) -> STNode:
-        return self.nodes[sp_gidx]
+    def __getitem__(self, node_id: STNodeId) -> STNode:
+        return self.nodes[node_id]
+
+    def _eval_requirement(
+        self,
+        requirement: Any,
+        *,
+        visiting: set[STNodeId] | None = None,
+    ) -> bool:
+        if isinstance(requirement, STNodeRef):
+            return self.is_solved(
+                requirement.node_id,
+                visiting=visiting,
+            )
+
+        if isinstance(requirement, STInverseRef):
+            return requirement.solved
+
+        if isinstance(requirement, STSet):
+            values = [
+                self._eval_requirement(member, visiting=visiting)
+                for member in requirement.members
+            ]
+
+            if requirement.mode == "AND":
+                return all(values)
+
+            return any(values)
+
+        raise TypeError(
+            "ST requirements must be STNodeRef, STInverseRef, or STSet."
+        )
+
+    def is_solved(
+        self,
+        node_id: STNodeId,
+        *,
+        visiting: set[STNodeId] | None = None,
+    ) -> bool:
+        node = self.nodes[node_id]
+
+        if node.directly_solved:
+            return True
+
+        if node.derivation is None:
+            return False
+
+        visiting = set() if visiting is None else set(visiting)
+
+        if node_id in visiting:
+            raise ValueError(
+                f"Cycle detected while evaluating ST node {node_id!r}."
+            )
+
+        visiting.add(node_id)
+
+        return self._eval_requirement(
+            node.derivation,
+            visiting=visiting,
+        )
+
+    def needs_gp_solution(self, node_id: STNodeId) -> bool:
+        """Whether this is an unresolved leaf with concrete SP data."""
+        node = self.nodes[node_id]
+
+        return (
+            node.sp_gidx is not None
+            and not self.is_solved(node_id)
+            and node.derivation is None
+            and not node.innate
+        )
+
+    @property
+    def solved(self) -> bool:
+        return bool(self.roots) and all(
+            self.is_solved(root)
+            for root in self.roots
+        )
 
     def mark_solution(self, sp_gidx: int, gp_gidx: int) -> None:
         gp_gidx = int(gp_gidx)
         if gp_gidx < 0:
             raise ValueError("gp_gidx must be non-negative.")
+        if sp_gidx not in self.nodes:
+            raise KeyError(f"No ST node for SP gene {sp_gidx}.")
         self.nodes[sp_gidx].gp_gidx = gp_gidx
 
     def clear_solution(self, sp_gidx: int) -> None:
+        if sp_gidx not in self.nodes:
+            raise KeyError(f"No ST node for SP gene {sp_gidx}.")
         self.nodes[sp_gidx].gp_gidx = -1
 
     def sync(self, SP_meta: ProgramMeta) -> None:
-        """Rebuild from SP structure while preserving known GP matches."""
-        prior = {
-            gidx: node.gp_gidx
-            for gidx, node in self.nodes.items()
-            if node.gp_gidx >= 0
-        }
+        """Add new SP nodes without destroying boolean proof structure."""
+        if SP_meta.side != "SP":
+            raise ValueError("SolutionTree.sync requires SP_meta.")
 
-        rebuilt = SolutionTree.from_sp_meta(SP_meta)
+        for gidx in range(len(SP_meta)):
+            if gidx in self.nodes:
+                node = self.nodes[gidx]
+                node.op = SP_meta.op[gidx]
+                node.dims = SP_meta.dims[gidx]
+                node.source = SP_meta.source[gidx]
+                continue
 
-        for gidx, gp_gidx in prior.items():
-            if gidx in rebuilt.nodes:
-                rebuilt.nodes[gidx].gp_gidx = gp_gidx
+            self.nodes[gidx] = STNode(
+                node_id=gidx,
+                label=f"sp_{gidx}:{SP_meta.op[gidx]}",
+                sp_gidx=gidx,
+                op=SP_meta.op[gidx],
+                dims=SP_meta.dims[gidx],
+                source=SP_meta.source[gidx],
+            )
 
-        self.nodes = rebuilt.nodes
-        self.roots = rebuilt.roots
+    def _append_alternative(
+        self,
+        node_id: STNodeId,
+        branch: STSet,
+    ) -> None:
+        node = self.nodes[node_id]
+
+        if node.derivation is None:
+            node.derivation = STSet(
+                mode="OR",
+                members=[branch],
+                label=f"{node.label} alternatives",
+            )
+            return
+
+        if node.derivation.mode != "OR":
+            node.derivation = STSet(
+                mode="OR",
+                members=[node.derivation, branch],
+                label=f"{node.label} alternatives",
+            )
+            return
+
+        node.derivation.members.append(branch)
+
+    def initialize_output_partition(
+        self,
+        *,
+        shape_gidx: int,
+        composite_gidxs: Iterable[int],
+    ) -> None:
+        """Create the initial root = shape AND composite proof structure."""
+        composite_gidxs = tuple(int(gidx) for gidx in composite_gidxs)
+
+        if 0 not in self.nodes:
+            raise KeyError("ST root SP gene 0 is missing.")
+        if shape_gidx not in self.nodes:
+            raise KeyError(f"Missing shape SP gene {shape_gidx}.")
+
+        for gidx in composite_gidxs:
+            if gidx not in self.nodes:
+                raise KeyError(f"Missing composite SP gene {gidx}.")
+
+        composite_id: STNodeId = "composite"
+
+        composite_branch = STSet(
+            mode="AND",
+            members=[
+                STInverseRef("inv_partition_composite"),
+                *[
+                    STNodeRef(gidx)
+                    for gidx in composite_gidxs
+                ],
+            ],
+            label="assemble composite",
+            partition="and",
+        )
+
+        self.nodes[composite_id] = STNode(
+            node_id=composite_id,
+            label="composite",
+            sp_gidx=None,
+            op="logical_composite",
+            dims=2,
+            derivation=STSet(
+                mode="OR",
+                members=[composite_branch],
+                label="composite alternatives",
+            ),
+        )
+
+        root_branch = STSet(
+            mode="AND",
+            members=[
+                STInverseRef("inv_partition_shape"),
+                STNodeRef(shape_gidx),
+                STNodeRef(composite_id),
+            ],
+            label="shape AND composite",
+            partition="and",
+        )
+
+        self.nodes[0].derivation = STSet(
+            mode="OR",
+            members=[root_branch],
+            label="root alternatives",
+        )
+
+        self.nodes[shape_gidx].label = "shape"
+
+    def register_generation(
+        self,
+        SP_meta: ProgramMeta,
+        *,
+        source_gidx: int,
+        generated_gidxs: Iterable[int],
+        partition: str,
+        inverse_op: str,
+        op_name: str,
+    ) -> None:
+        """Attach one reversible SP transformation as a proof alternative."""
+        partition = str(partition).lower()
+
+        if partition not in {"and", "or"}:
+            raise ValueError(
+                "Only AND/OR partition operations may extend ST."
+            )
+
+        self.sync(SP_meta)
+
+        generated_gidxs = tuple(
+            int(gidx) for gidx in generated_gidxs
+        )
+
+        if source_gidx not in self.nodes:
+            raise KeyError(f"Missing source ST node {source_gidx}.")
+
+        for gidx in generated_gidxs:
+            if gidx not in self.nodes:
+                raise KeyError(f"Missing generated ST node {gidx}.")
+
+        branch = STSet(
+            mode="AND",
+            members=[
+                STInverseRef(inverse_op),
+                *[
+                    STNodeRef(gidx)
+                    for gidx in generated_gidxs
+                ],
+            ],
+            label=f"{inverse_op} AND transformed data",
+            partition=partition,
+        )
+
+        self._append_alternative(source_gidx, branch)
+
+    def unresolved_leaf_nodes(
+        self,
+        node_id: STNodeId | None = None,
+    ) -> tuple[STNodeId, ...]:
+        """Return concrete unresolved leaves reachable from one solution node."""
+        if node_id is None:
+            if not self.roots:
+                return ()
+            node_id = self.roots[0]
+
+        result: list[STNodeId] = []
+        seen: set[STNodeId] = set()
+
+        def collect_requirement(requirement: Any) -> None:
+            if isinstance(requirement, STInverseRef):
+                return
+
+            if isinstance(requirement, STSet):
+                for member in requirement.members:
+                    collect_requirement(member)
+                return
+
+            if isinstance(requirement, STNodeRef):
+                collect_node(requirement.node_id)
+                return
+
+            raise TypeError("Unknown ST requirement type.")
+
+        def collect_node(current_id: STNodeId) -> None:
+            if current_id in seen:
+                return
+
+            seen.add(current_id)
+            node = self.nodes[current_id]
+
+            if self.is_solved(current_id):
+                return
+
+            if node.derivation is None:
+                if node.sp_gidx is not None:
+                    result.append(current_id)
+                return
+
+            collect_requirement(node.derivation)
+
+        collect_node(node_id)
+
+        return tuple(result)
+
+    def _format_requirement(self, requirement: Any) -> str:
+        if isinstance(requirement, STNodeRef):
+            return str(requirement.node_id)
+
+        if isinstance(requirement, STInverseRef):
+            return f"{requirement.inverse_op}✓"
+
+        if isinstance(requirement, STSet):
+            body = f" {requirement.mode} ".join(
+                self._format_requirement(member)
+                for member in requirement.members
+            )
+            return f"({body})"
+
+        return repr(requirement)
 
     def rows(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "sp_gidx": gidx,
-                "op": node.op,
-                "dims": node.dims,
-                "parents": node.parents,
-                "children": tuple(node.children),
-                "gp_gidx": node.gp_gidx,
-                "solved": node.solved,
-            }
-            for gidx, node in sorted(self.nodes.items())
-        ]
+        rows = []
+
+        for node_id, node in self.nodes.items():
+            rows.append(
+                {
+                    "node_id": node_id,
+                    "label": node.label,
+                    "sp_gidx": node.sp_gidx,
+                    "op": node.op,
+                    "dims": node.dims,
+                    "source": node.source,
+                    "gp_gidx": node.gp_gidx,
+                    "directly_solved": node.directly_solved,
+                    "solved": self.is_solved(node_id),
+                    "needs_gp_solution": self.needs_gp_solution(node_id),
+                    "derivation": (
+                        None
+                        if node.derivation is None
+                        else self._format_requirement(node.derivation)
+                    ),
+                }
+            )
+
+        return rows
 
 
 def _extract_pair_grid(sample: Any, field_name: str) -> np.ndarray:
@@ -411,7 +747,7 @@ def init_env(
       GP gene 0 = input matrix
       SP gene 0 = output matrix
 
-    Then both sides receive the default full-partition operations:
+    Then both sides receive the default AND-partition operations:
       gene 1 = partition_shape(gene 0)
       genes 2.. = partition_composite(gene 0)
 
@@ -419,8 +755,11 @@ def init_env(
     the complete sample set: one scalar int64 color ID and one 2D boolean
     presence mask.
 
-    SP operation enforcement occurs inside notebooks.ops.ops: only operations
-    registered as full_partition are legal on the SP side.
+    ST begins as a boolean proof:
+        root = shape AND composite
+
+    Later SP transformations may add reversible OR/AND alternatives. NULL
+    partition operations are GP-only.
     """
     grid_set = list(grid_set)
 
@@ -454,9 +793,21 @@ def init_env(
     partition_shape(GP_meta, GP_X, 0)
     partition_composite(GP_meta, GP_X, 0)
 
-    partition_shape(SP_meta, SP_X, 0)
-    partition_composite(SP_meta, SP_X, 0)
-
+    # Build ST from the raw output first, then add the initial solution
+    # decomposition explicitly as:
+    #
+    #     root <- shape AND composite
+    #
+    # Composite itself is reconstructed from every per-color ID/presence gene.
     ST = SolutionTree.from_sp_meta(SP_meta)
+
+    shape_gidx = partition_shape(SP_meta, SP_X, 0)
+    composite_gidxs = partition_composite(SP_meta, SP_X, 0)
+
+    ST.sync(SP_meta)
+    ST.initialize_output_partition(
+        shape_gidx=shape_gidx,
+        composite_gidxs=composite_gidxs,
+    )
 
     return GP_meta, GP_X, SP_meta, SP_X, ST

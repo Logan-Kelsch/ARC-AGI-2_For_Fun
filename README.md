@@ -37,7 +37,7 @@ INPUT SIDE                         OUTPUT SIDE
 
 GP_meta / GP_X                     SP_meta / SP_X
       |                                  |
-      | arbitrary GP transforms          | full-partition transforms only
+      | arbitrary GP transforms          | reversible AND/OR transforms
       v                                  v
 candidate interpretations          exact solution decomposition
       |                                  |
@@ -110,9 +110,15 @@ SP has the same metadata/data structure as GP, but is instantiated from the know
 
 The critical restriction is:
 
-> **SP may only use operations marked full_partition=True.**
+SP is restricted by proof semantics rather than a full-partition flag:
 
-SP is therefore not another free-form search space. It is a lossless decomposition of the solution representation.
+~~~text
+AND   jointly reconstructive decomposition
+OR    reversible alternative representation
+NULL  GP-only / not a valid SP proof transform
+~~~
+
+SP may use AND/OR operations and rejects NULL operations.
 
 ---
 
@@ -170,13 +176,12 @@ op(SP_meta, SP_X, source_idx)
 Each registered operation declares:
 
 ~~~text
-full_partition
+partition = "and" | "or" | "null"
+inverse_op
 output_count
 ~~~
 
-GP may use any registered operation.
-
-SP calls are rejected unless the operation is full_partition.
+GP may use any registered operation. SP rejects NULL operations.
 
 ---
 
@@ -229,7 +234,7 @@ color_3_id, color_3_presence
 A color that is absent from one sample receives an all-False presence mask for
 that sample, keeping gene indices aligned across demonstrations.
 
-Both initial operations are full partitions and are therefore legal on SP.
+Both initial operations are AND partitions and are legal on SP.
 
 ---
 
@@ -267,6 +272,34 @@ gidx   operation                source   dims
 For C distinct colors, that side starts with `2 + 2*C` genes. ST is built
 directly from the resulting SP structure, and every node begins unresolved with
 gp_gidx=-1.
+
+---
+
+## Boolean ST solving
+
+ST is now evaluated as a Boolean proof rather than a plain SP dependency tree.
+
+The initial proof is:
+
+~~~text
+root = shape AND composite
+~~~
+
+A reversible SP transform creates an alternative branch. For example:
+
+~~~text
+composite_target
+OR
+(
+    inverse_rotate
+    AND rotated_target
+)
+~~~
+
+Therefore the original target does not need a direct GP match if its transformed
+representation is solved and the inverse is known.
+
+Reverse transforms live in notebooks/ops/inv_ops.py.
 
 ---
 
