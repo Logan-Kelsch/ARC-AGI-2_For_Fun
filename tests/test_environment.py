@@ -716,7 +716,7 @@ def test_gp_generate_zero_is_noop():
     assert len(GP_X) == 8
 
 
-def test_sp_generate_runs_one_full_partition_step_and_syncs_st():
+def test_sp_generate_runs_one_reversible_step_and_updates_st():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     before = len(SP_X)
@@ -726,20 +726,26 @@ def test_sp_generate_runs_one_full_partition_step_and_syncs_st():
         SP_X,
         ST,
         rng=11,
-        operation_names=("partition_shape", "partition_composite"),
+        operation_names=("mat2_cwrotate",),
     )
 
-    assert len(new_gidx) >= 1
-    assert len(SP_X) == before + len(new_gidx)
+    assert len(new_gidx) == 1
+    assert len(SP_X) == before + 1
     assert len(SP_meta) == len(SP_X)
-    assert len(ST) == len(SP_X)
 
-    for gidx in new_gidx:
-        assert OP_REGISTRY[SP_meta.op[gidx]].full_partition
-        assert ST[gidx].gp_gidx == -1
+    # ST also contains the logical composite node.
+    assert len(ST) == len(SP_X) + 1
+
+    gidx = new_gidx[0]
+    assert OP_REGISTRY[SP_meta.op[gidx]].partition == "or"
+    assert ST[gidx].gp_gidx == -1
+
+    source = SP_meta.source[gidx]
+    assert ST[source].derivation is not None
+    assert ST[source].derivation.mode == "OR"
 
 
-def test_sp_generate_returns_empty_when_no_registered_full_partition_is_valid():
+def test_sp_generate_returns_empty_when_no_reversible_partition_is_valid():
     meta = ProgramMeta(side="SP")
     X = ProgramX(side="SP", sample_count=1)
 
