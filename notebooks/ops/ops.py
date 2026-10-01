@@ -966,7 +966,15 @@ def _indiv_1dim_output_count(
     params: dict[str, Any],
 ) -> int:
     source = _source_tuple(source_idx)[0]
-    return len(np.asarray(X[source, 0]))
+    array = np.asarray(X[source, 0])
+
+    # Candidate enumeration can ask for output count before dimensional
+    # validity is checked. Invalid sources return a harmless placeholder count
+    # and are rejected immediately afterward by valid_generation.
+    if array.ndim != 1 or len(array) == 0:
+        return 1
+
+    return len(array)
 
 
 @operation(
