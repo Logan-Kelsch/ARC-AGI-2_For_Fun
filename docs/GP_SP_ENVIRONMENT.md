@@ -1064,3 +1064,122 @@ get_ST_unsovled_frontier(
 
 The exact requested name get_ST_unsovled_frontier is retained. A correctly
 spelled alias, get_ST_unsolved_frontier, is exported as well.
+
+
+## Typed computation pools
+
+The SP frontier and GP search pool now share the same retrieval filters:
+
+~~~text
+min_dim
+max_dim
+dtype
+~~~
+
+### ST frontier
+
+~~~python
+target_pool = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+~~~
+
+returns unresolved 2D boolean SP targets only.
+
+Use dtype=None to keep every datatype:
+
+~~~python
+scalar_targets = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=0,
+    max_dim=0,
+    dtype=None,
+)
+~~~
+
+### GP pool
+
+~~~python
+candidate_pool = get_GP_pool(
+    GP_meta,
+    GP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+~~~
+
+returns every currently instantiated GP gene that is 2D boolean data.
+
+With no filters:
+
+~~~python
+candidate_pool = get_GP_pool(
+    GP_meta,
+    GP_X,
+)
+~~~
+
+the complete current GP program pool is returned.
+
+### dtype semantics
+
+dtype is normalized through NumPy, so these are equivalent boolean filters:
+
+~~~python
+dtype=bool
+dtype=np.bool_
+dtype="bool"
+~~~
+
+Likewise:
+
+~~~python
+dtype=np.int64
+dtype="int64"
+~~~
+
+select int64 genes.
+
+The filter applies to the atomic instantiated datatype across the complete gene
+and all training samples. A gene is selected only when its observed atomic dtype
+is exactly the requested dtype.
+
+### Matching workflow
+
+These helpers are intended to define the actual computation/evaluation pools.
+
+For example:
+
+~~~python
+targets = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+
+candidates = get_GP_pool(
+    GP_meta,
+    GP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+~~~
+
+now gives two structurally compatible collections:
+
+~~~text
+unresolved 2D bool SP targets
+versus
+available 2D bool GP genes
+~~~
+
+which can be passed directly into the later exact solution-matching layer.
