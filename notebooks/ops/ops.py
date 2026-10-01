@@ -1316,10 +1316,6 @@ def _eligible_operation_infos(
         if info.func is not None
         and (allowed_names is None or info.name in allowed_names)
         and (side != "SP" or info.full_partition)
-        and (
-            max_output_count is None
-            or info.output_count <= max_output_count
-        )
     ]
     return infos
 
@@ -1361,7 +1357,7 @@ def _parameterless_valid_candidates(
     max_output_count: int | None = None,
     operation_names: Iterable[str] | None = None,
     excluded_signatures: set[Any] | None = None,
-) -> list[tuple[OperationInfo, int, dict[str, Any]]]:
+) -> list[tuple[OperationInfo, Any, dict[str, Any]]]:
     """Enumerate the complete finite candidate space for parameterless ops."""
     excluded_signatures = excluded_signatures or set()
     infos = _eligible_operation_infos(
@@ -1381,6 +1377,18 @@ def _parameterless_valid_candidates(
             signature = _candidate_signature(info, source_idx, params)
 
             if signature in excluded_signatures:
+                continue
+
+            if (
+                max_output_count is not None
+                and operation_output_count(
+                    info,
+                    meta,
+                    X,
+                    source_idx,
+                    params=params,
+                ) > max_output_count
+            ):
                 continue
 
             if valid_generation(
@@ -1420,7 +1428,7 @@ def _random_parameterized_candidate(
     max_attempts: int,
     operation_names: Iterable[str] | None,
     excluded_signatures: set[Any],
-) -> tuple[OperationInfo, int, dict[str, Any]] | None:
+) -> tuple[OperationInfo, Any, dict[str, Any]] | None:
     infos = [
         info
         for info in _eligible_operation_infos(
@@ -1444,6 +1452,18 @@ def _random_parameterized_candidate(
         signature = _candidate_signature(info, source_idx, params)
 
         if signature in excluded_signatures:
+            continue
+
+        if (
+            max_output_count is not None
+            and operation_output_count(
+                info,
+                meta,
+                X,
+                source_idx,
+                params=params,
+            ) > max_output_count
+        ):
             continue
 
         if valid_generation(
@@ -1537,6 +1557,14 @@ def _try_candidate_transactionally(
     params: dict[str, Any],
 ) -> tuple[list[int], str | None]:
     """Apply one candidate and keep it only when all outputs are novel."""
+    expected_output_count = operation_output_count(
+        info,
+        meta,
+        X,
+        source_idx,
+        params=params,
+    )
+
     meta_before = len(meta)
     x_before = len(X)
 
@@ -1548,7 +1576,7 @@ def _try_candidate_transactionally(
     )
     new_indices = _flatten_generated_indices(result)
 
-    if len(new_indices) != info.output_count:
+    if len(new_indices) != expected_output_count:
         _rollback_appended_genes(
             meta,
             X,
@@ -1557,7 +1585,7 @@ def _try_candidate_transactionally(
         )
         raise RuntimeError(
             f"{info.name!r} returned {len(new_indices)} indices but "
-            f"declares output_count={info.output_count}."
+            f"expected {expected_output_count}."
         )
 
     novel, reason = _generated_outputs_are_novel(
