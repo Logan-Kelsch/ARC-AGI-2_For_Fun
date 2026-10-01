@@ -185,6 +185,118 @@ def test_partition_shape_generates_h_and_w_scalar_genes():
     assert meta.dims == [2, 0, 0]
 
 
+def test_indiv_1dim_generates_one_scalar_gene_per_position():
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=2)
+
+    X.append_gene(
+        [
+            np.array([10, 20, 30], dtype=np.int64),
+            np.array([40, 50, 60], dtype=np.int64),
+        ]
+    )
+    meta.append(source=-1, op="raw_input", dims=1)
+
+    assert valid_generation(meta, X, indiv_1dim, 0)
+    assert operation_output_count(indiv_1dim, meta, X, 0) == 3
+
+    generated = indiv_1dim(meta, X, 0)
+
+    assert generated == (1, 2, 3)
+    assert meta.source == [-1, 0, 0, 0]
+    assert meta.op == [
+        "raw_input",
+        "indiv_1dim",
+        "indiv_1dim",
+        "indiv_1dim",
+    ]
+    assert meta.dims == [1, 0, 0, 0]
+
+    assert X[1, 0] == np.int64(10)
+    assert X[1, 1] == np.int64(40)
+    assert X[2, 0] == np.int64(20)
+    assert X[2, 1] == np.int64(50)
+    assert X[3, 0] == np.int64(30)
+    assert X[3, 1] == np.int64(60)
+
+
+def test_indiv_1dim_requires_exactly_1d_and_consistent_length():
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=2)
+
+    X.append_gene(
+        [
+            np.array([1, 2], dtype=np.int64),
+            np.array([3, 4, 5], dtype=np.int64),
+        ]
+    )
+    meta.append(source=-1, op="raw_input", dims=1)
+
+    assert not valid_generation(meta, X, indiv_1dim, 0)
+
+    matrix_meta, matrix_X = _raw_program(
+        "GP",
+        [np.array([[1, 2]], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    assert not valid_generation(
+        matrix_meta,
+        matrix_X,
+        indiv_1dim,
+        0,
+    )
+
+
+def test_indiv_1dim_sp_generation_creates_and_branch_inside_source_or():
+    meta = ProgramMeta(side="SP")
+    X = ProgramX(side="SP", sample_count=2)
+
+    X.append_gene(
+        [
+            np.array([1, 2, 3], dtype=np.int64),
+            np.array([4, 5, 6], dtype=np.int64),
+        ]
+    )
+    meta.append(source=-1, op="raw_output", dims=1)
+
+    ST = SolutionTree.from_sp_meta(meta)
+
+    generated = SP_generate(
+        meta,
+        X,
+        ST,
+        rng=0,
+        operation_names=("indiv_1dim",),
+    )
+
+    assert generated == [1, 2, 3]
+
+    source_derivation = ST[0].derivation
+    assert isinstance(source_derivation, STSet)
+    assert source_derivation.mode == "OR"
+
+    branch = source_derivation.members[0]
+    assert isinstance(branch, STSet)
+    assert branch.mode == "AND"
+    assert branch.partition == "and"
+    assert branch.members == [
+        STInverseRef("inv_indiv_1dim"),
+        STNodeRef(1),
+        STNodeRef(2),
+        STNodeRef(3),
+    ]
+
+    assert not ST.is_solved(0)
+
+    ST.mark_solution(1, 101)
+    ST.mark_solution(2, 102)
+    assert not ST.is_solved(0)
+
+    ST.mark_solution(3, 103)
+    assert ST.is_solved(0)
+
+
 def test_partition_composite_generates_one_id_mask_pair_per_color():
     meta = ProgramMeta(side="GP")
     X = ProgramX(side="GP", sample_count=2)
@@ -1361,6 +1473,7 @@ def test_operation_partition_categories():
     assert OP_REGISTRY["dim2_flip"].partition == "or"
 
     assert OP_REGISTRY["partition_bool_trim"].partition == "and"
+    assert OP_REGISTRY["indiv_1dim"].partition == "and"
 
     assert OP_REGISTRY["bool2_union"].partition == "null"
     assert OP_REGISTRY["bool2_intersect"].partition == "null"
