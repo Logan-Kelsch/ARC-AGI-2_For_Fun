@@ -631,6 +631,101 @@ def _validate_source(meta: ProgramMeta, X: ProgramX, source_idx: int) -> int:
     return source_idx
 
 
+def _validate_sources(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    *,
+    expected_count: int,
+) -> tuple[int, ...]:
+    _validate_program_pair(meta, X)
+    indices = _source_tuple(source_idx)
+
+    if len(indices) != expected_count:
+        raise ValueError(
+            f"Expected {expected_count} source genes, got {len(indices)}."
+        )
+
+    for index in indices:
+        if index < 0 or index >= len(X):
+            raise IndexError(
+                f"source index {index} is outside {X.side}_X gene range "
+                f"[0, {len(X) - 1}]."
+            )
+
+    return indices
+
+
+def _bool2_same_shape_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    first, second = _source_tuple(source_idx)
+
+    if first == second:
+        return False
+
+    return all(
+        np.asarray(X[first, sample_idx]).shape
+        == np.asarray(X[second, sample_idx]).shape
+        for sample_idx in range(X.sample_count)
+    )
+
+
+def _bool_trim_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    source = _source_tuple(source_idx)[0]
+
+    for sample_idx in range(X.sample_count):
+        array = np.asarray(X[source, sample_idx], dtype=bool)
+
+        if array.ndim == 0 or any(size == 0 for size in array.shape):
+            return False
+
+        removable_boundary = False
+
+        for axis in range(array.ndim):
+            first_slice = np.take(array, 0, axis=axis)
+            last_slice = np.take(array, -1, axis=axis)
+
+            if not np.any(first_slice) or not np.any(last_slice):
+                removable_boundary = True
+                break
+
+        if not removable_boundary:
+            return False
+
+    return True
+
+
+def _trim_bool_array(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (offset, tight boolean bounding box) for one sample."""
+    array = np.asarray(array, dtype=bool)
+
+    true_coords = np.argwhere(array)
+
+    if true_coords.size == 0:
+        offset = np.zeros(array.ndim, dtype=np.int64)
+        slices = tuple(slice(0, 0) for _ in range(array.ndim))
+        return offset, array[slices].copy()
+
+    starts = true_coords.min(axis=0).astype(np.int64, copy=False)
+    stops = true_coords.max(axis=0) + 1
+
+    slices = tuple(
+        slice(int(start), int(stop))
+        for start, stop in zip(starts, stops)
+    )
+
+    return starts.copy(), array[slices].copy()
+
+
 def _append_gene(
     meta: ProgramMeta,
     X: ProgramX,
@@ -738,6 +833,266 @@ def partition_composite(
 
     return color_gidx, presence_gidx
 
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    atomic_dtypes=(np.bool_,),
+)
+def bool_complement(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Boolean complement preserving the complete source shape."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.logical_not(np.asarray(value, dtype=bool))
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="bool_complement",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    source_count=2,
+    ordered_sources=False,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool2_same_shape_validator,
+)
+def bool2_union(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: tuple[int, int],
+) -> int:
+    """Elementwise boolean union of two same-shaped boolean genes."""
+    first, second = sorted(
+        _validate_sources(
+            meta,
+            X,
+            source_idx,
+            expected_count=2,
+        )
+    )
+    source = (first, second)
+
+    values = [
+        np.logical_or(
+            np.asarray(X[first, sample_idx], dtype=bool),
+            np.asarray(X[second, sample_idx], dtype=bool),
+        )
+        for sample_idx in range(X.sample_count)
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source,
+        op_name="bool2_union",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    source_count=2,
+    ordered_sources=False,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool2_same_shape_validator,
+)
+def bool2_intersect(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: tuple[int, int],
+) -> int:
+    """Elementwise boolean intersection of two same-shaped boolean genes."""
+    first, second = sorted(
+        _validate_sources(
+            meta,
+            X,
+            source_idx,
+            expected_count=2,
+        )
+    )
+    source = (first, second)
+
+    values = [
+        np.logical_and(
+            np.asarray(X[first, sample_idx], dtype=bool),
+            np.asarray(X[second, sample_idx], dtype=bool),
+        )
+        for sample_idx in range(X.sample_count)
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source,
+        op_name="bool2_intersect",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    allowed_dims=(2,),
+)
+def mat2_cwrotate(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Rotate every 2D sample clockwise by 90 degrees."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.rot90(np.asarray(value), k=-1).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="mat2_cwrotate",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    min_dims_exclusive=0,
+)
+def dim0_flip(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Reverse values along dimension 0."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.flip(np.asarray(value), axis=0).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="dim0_flip",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    min_dims_exclusive=1,
+)
+def dim1_flip(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Reverse values along dimension 1."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.flip(np.asarray(value), axis=1).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="dim1_flip",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    min_dims_exclusive=2,
+)
+def dim2_flip(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Reverse values along dimension 2."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.flip(np.asarray(value), axis=2).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="dim2_flip",
+    )
+
+
+@operation(
+    full_partition=True,
+    output_count=2,
+    min_dims_exclusive=0,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool_trim_validator,
+)
+def partition_bool_trim(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> tuple[int, int]:
+    """Partition a boolean gene into offset and tight remaining structure."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    offsets = []
+    trimmed_values = []
+
+    for value in X[source_idx]:
+        offset, trimmed = _trim_bool_array(
+            np.asarray(value, dtype=bool)
+        )
+        offsets.append(offset)
+        trimmed_values.append(trimmed)
+
+    offset_gidx = _append_gene(
+        meta,
+        X,
+        offsets,
+        source=source_idx,
+        op_name="partition_bool_trim",
+    )
+    data_gidx = _append_gene(
+        meta,
+        X,
+        trimmed_values,
+        source=source_idx,
+        op_name="partition_bool_trim",
+    )
+
+    return offset_gidx, data_gidx
 
 def _rng(
     rng: np.random.Generator | int | None,
