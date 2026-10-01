@@ -350,18 +350,34 @@ def test_null_partition_operation_is_allowed_on_gp_but_rejected_on_sp():
     OP_REGISTRY.pop("test_nonpartition", None)
 
 
-def test_solution_tree_initializes_as_root_shape_and_composite_boolean_proof():
+def test_solution_tree_initializes_shape_as_h_and_w_boolean_proof():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     assert ST.roots == (0,)
 
-    # Eight concrete SP genes plus one logical composite node.
-    assert len(ST) == 9
+    # Nine concrete SP genes plus logical shape and composite nodes.
+    assert len(ST) == 11
+    assert "shape" in ST.nodes
     assert "composite" in ST.nodes
 
     assert ST[0].label == "root"
-    assert ST[1].label == "shape"
+    assert ST[1].label == "h"
+    assert ST[2].label == "w"
+    assert ST["shape"].sp_gidx is None
     assert ST["composite"].sp_gidx is None
+
+    shape_or = ST["shape"].derivation
+    assert isinstance(shape_or, STSet)
+    assert shape_or.mode == "OR"
+
+    shape_branch = shape_or.members[0]
+    assert isinstance(shape_branch, STSet)
+    assert shape_branch.mode == "AND"
+    assert shape_branch.partition == "and"
+    assert shape_branch.members == [
+        STNodeRef(1),
+        STNodeRef(2),
+    ]
 
     assert isinstance(ST[0].derivation, STSet)
     assert ST[0].derivation.mode == "OR"
@@ -371,10 +387,11 @@ def test_solution_tree_initializes_as_root_shape_and_composite_boolean_proof():
     assert root_branch.mode == "AND"
     assert root_branch.partition == "and"
 
-    assert isinstance(root_branch.members[0], STInverseRef)
-    assert root_branch.members[0].inverse_op == "inv_partition_shape"
-    assert root_branch.members[1] == STNodeRef(1)
-    assert root_branch.members[2] == STNodeRef("composite")
+    assert root_branch.members == [
+        STInverseRef("inv_partition_shape"),
+        STNodeRef("shape"),
+        STNodeRef("composite"),
+    ]
 
     composite_or = ST["composite"].derivation
     assert isinstance(composite_or, STSet)
@@ -390,24 +407,27 @@ def test_solution_tree_initializes_as_root_shape_and_composite_boolean_proof():
 
     assert composite_branch.members[1:] == [
         STNodeRef(gidx)
-        for gidx in range(2, 8)
+        for gidx in range(3, 9)
     ]
 
     assert not ST.solved
-    assert ST.unresolved_leaf_nodes() == tuple(range(1, 8))
+    assert ST.unresolved_leaf_nodes() == tuple(range(1, 9))
 
 
-def test_solution_tree_boolean_and_requires_every_initial_leaf():
+def test_solution_tree_boolean_and_requires_h_w_and_every_composite_leaf():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
-    for gidx in range(1, 7):
+    # Solve h, w, and all but the last composite leaf.
+    for gidx in range(1, 8):
         ST.mark_solution(gidx, 100 + gidx)
 
+    assert ST.is_solved("shape")
     assert not ST.is_solved("composite")
     assert not ST.is_solved(0)
 
-    ST.mark_solution(7, 107)
+    ST.mark_solution(8, 108)
 
+    assert ST.is_solved("shape")
     assert ST.is_solved("composite")
     assert ST.is_solved(0)
     assert ST.solved
@@ -435,22 +455,22 @@ def test_solution_tree_sync_preserves_boolean_structure_and_matches():
     original_root_derivation = ST[0].derivation
     ST.mark_solution(1, 5)
 
-    new_gidx = partition_shape(SP_meta, SP_X, 1)
-    assert new_gidx == 8
+    new_gidx = mat2_cwrotate(SP_meta, SP_X, 4)
+    assert new_gidx == 9
 
     ST.sync(SP_meta)
 
-    assert len(ST) == 10
+    assert len(ST) == 12
     assert ST[1].gp_gidx == 5
-    assert ST[8].source == 1
-    assert ST[8].gp_gidx == -1
+    assert ST[9].source == 4
+    assert ST[9].gp_gidx == -1
     assert ST[0].derivation is original_root_derivation
 
 
 def test_or_partition_adds_inverse_and_transformed_alternative():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
-    source_gidx = 3
+    source_gidx = 4
     transformed_gidx = mat2_cwrotate(SP_meta, SP_X, source_gidx)
 
     ST.register_generation(
@@ -477,8 +497,6 @@ def test_or_partition_adds_inverse_and_transformed_alternative():
         STNodeRef(transformed_gidx),
     ]
 
-    # The source itself remains unsolved, but solving the transformed
-    # representation is enough because the inverse operation is innate.
     ST.mark_solution(transformed_gidx, 55)
 
     assert ST[source_gidx].gp_gidx == -1
@@ -488,14 +506,16 @@ def test_or_partition_adds_inverse_and_transformed_alternative():
 def test_user_example_shape_and_rotated_composite_path_solves_root():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
-    # Shape is solved directly.
+    # Shape requires both h and w.
     ST.mark_solution(1, 10)
+    ST.mark_solution(2, 11)
+    assert ST.is_solved("shape")
 
-    # Solve all composite leaves except one mask.
-    for gidx in (2, 4, 5, 6, 7):
+    # Solve all composite leaves except one presence mask.
+    for gidx in (3, 5, 6, 7, 8):
         ST.mark_solution(gidx, 100 + gidx)
 
-    unresolved_mask = 3
+    unresolved_mask = 4
     rotated = mat2_cwrotate(
         SP_meta,
         SP_X,
@@ -516,7 +536,6 @@ def test_user_example_shape_and_rotated_composite_path_solves_root():
     assert ST.is_solved("composite")
     assert ST.is_solved(0)
     assert ST.solved
-
 
 
 def test_program_meta_rows_and_program_x_object_matrix_are_easy_to_inspect():
@@ -757,8 +776,8 @@ def test_sp_generate_runs_one_reversible_step_and_updates_st():
     assert len(SP_X) == before + 1
     assert len(SP_meta) == len(SP_X)
 
-    # ST also contains the logical composite node.
-    assert len(ST) == len(SP_X) + 1
+    # ST also contains logical shape and composite nodes.
+    assert len(ST) == len(SP_X) + 2
 
     gidx = new_gidx[0]
     assert OP_REGISTRY[SP_meta.op[gidx]].partition == "or"
