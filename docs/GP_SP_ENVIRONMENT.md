@@ -457,3 +457,94 @@ rotate(source=7, ...)
 
 This allows the operation library to grow substantially without relying on
 special-case duplicate rules for individual transformations.
+
+
+## Exact instantiated-gene novelty
+
+Generation now prevents a second form of redundancy in addition to duplicate
+operation/source/parameter transitions.
+
+A newly instantiated gene is retained only when its complete cross-sample data
+is novel relative to every gene already present on that side.
+
+Exact gene equality requires every sample value to match structurally:
+
+~~~text
+same representation type
+same array shape
+same array dtype
+same contents
+~~~
+
+and the complete gene must match across every training sample.
+
+Useful helpers:
+
+~~~python
+genes_exactly_equal(GP_X[i], GP_X[j])
+
+equivalent_gene_idx(
+    GP_X,
+    candidate_gene_values,
+)
+~~~
+
+equivalent_gene_idx returns the matching retained gene index, or -1 when the
+candidate is novel.
+
+### Transactional generation
+
+Random generation applies candidates transactionally.
+
+Conceptually:
+
+~~~text
+candidate operation
+        |
+        v
+instantiate temporary output gene(s)
+        |
+        v
+compare every output against all retained genes
+        |
+        +---- duplicate ----> rollback entire operation
+        |
+        '---- all novel ----> retain operation
+~~~
+
+For a multi-output operation, every output must be novel.
+
+If one output duplicates an existing gene, the complete operation invocation is
+rolled back rather than retaining only a partial partition.
+
+Outputs from the same invocation are also checked against one another.
+
+## Exhausting the legal generation space
+
+For the current parameterless operation library, GP_generate and SP_generate
+enumerate every legal operation/source candidate that remains after normal
+generation constraints.
+
+Candidates are shuffled before evaluation, so the search order remains random,
+but every legal candidate can be tried once.
+
+If all legal candidates either:
+
+- were already instantiated as exact transitions, or
+- instantiate data that exactly duplicates retained genes,
+
+generation stops early and prints:
+
+~~~text
+GP generation terminated: entire legal generation space was explored and no additional unique genes can be generated.
+~~~
+
+or the corresponding SP message.
+
+This means the generation loop does not continue retrying known-dead branches
+after the current grammar is saturated.
+
+Parameterized operations whose sampler has an effectively unbounded parameter
+domain cannot honestly be called exhaustively searched. Those retain bounded
+sampling behavior and print a separate sampled-parameter-space termination
+message if no novel output is found.
