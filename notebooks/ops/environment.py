@@ -295,6 +295,8 @@ class STNode:
     dims: int | None = None
     source: SourceRef | None = None
     gp_gidx: int = -1
+    solution_rule: str | None = None
+    solution_params: dict[str, Any] = field(default_factory=dict)
     derivation: STSet | None = None
     innate: bool = False
 
@@ -430,18 +432,31 @@ class SolutionTree:
             for root in self.roots
         )
 
-    def mark_solution(self, sp_gidx: int, gp_gidx: int) -> None:
+    def mark_solution(
+        self,
+        sp_gidx: int,
+        gp_gidx: int,
+        *,
+        rule: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> None:
         gp_gidx = int(gp_gidx)
         if gp_gidx < 0:
             raise ValueError("gp_gidx must be non-negative.")
         if sp_gidx not in self.nodes:
             raise KeyError(f"No ST node for SP gene {sp_gidx}.")
-        self.nodes[sp_gidx].gp_gidx = gp_gidx
+
+        node = self.nodes[sp_gidx]
+        node.gp_gidx = gp_gidx
+        node.solution_rule = None if rule is None else str(rule)
+        node.solution_params = dict(params or {})
 
     def clear_solution(self, sp_gidx: int) -> None:
         if sp_gidx not in self.nodes:
             raise KeyError(f"No ST node for SP gene {sp_gidx}.")
         self.nodes[sp_gidx].gp_gidx = -1
+        self.nodes[sp_gidx].solution_rule = None
+        self.nodes[sp_gidx].solution_params = {}
 
     def sync(self, SP_meta: ProgramMeta) -> None:
         """Add new SP nodes without destroying boolean proof structure."""
@@ -771,6 +786,8 @@ class SolutionTree:
                     "dims": node.dims,
                     "source": node.source,
                     "gp_gidx": node.gp_gidx,
+                    "solution_rule": node.solution_rule,
+                    "solution_params": dict(node.solution_params),
                     "directly_solved": node.directly_solved,
                     "solved": self.is_solved(node_id),
                     "needs_gp_solution": self.needs_gp_solution(node_id),
