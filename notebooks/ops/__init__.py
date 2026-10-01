@@ -58,6 +58,10 @@ from .ops import (
     sample_operation_params,
     valid_generation,
 )
+from .solve import (
+    Scalar1GeneSolution,
+    solve_0dim_1gene_basic,
+)
 """Notebook-local analytical operation library."""
 
 from .alpha_ops import DEFAULT_ABS_KERNELS, survey_abs_kernels
@@ -145,6 +149,8 @@ __all__ = [
     "partition_bool_trim",
     "partition_shape",
     "partition_composite",
+    "Scalar1GeneSolution",
+    "solve_0dim_1gene_basic",
     "DEFAULT_ABS_KERNELS",
     "survey_abs_kernels",
     "GP_EvalNode",
