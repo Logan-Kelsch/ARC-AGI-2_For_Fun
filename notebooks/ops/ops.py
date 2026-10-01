@@ -111,6 +111,12 @@ def operation(
                 if name not in {"meta", "X", "source_idx"}
             }
 
+            if meta.side == "SP" and not info.full_partition:
+                raise PermissionError(
+                    f"Operation {info.name!r} is not full_partition and "
+                    "cannot be applied to SP."
+                )
+
             reason = generation_invalid_reason(
                 meta,
                 X,
