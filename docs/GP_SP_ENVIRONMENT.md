@@ -702,3 +702,96 @@ empty along every dimension.
 Because partition_bool_trim is marked full_partition=True, it is the only one
 of this new operation group that SP_generate may use. The boolean set
 operations, rotations, and flips remain GP-only transformations.
+
+
+## bool_sum
+
+~~~text
+source_count: 1
+dtype: bool
+dims: any
+full_partition: False
+output dims: 0
+~~~
+
+Counts every True value in the instantiated source and emits one scalar
+\`np.int64\` per training sample.
+
+Examples:
+
+~~~text
+[True, False, True] -> 2
+
+[[True, True],
+ [False, True]] -> 3
+~~~
+
+The operation is GP-only.
+
+## bool_cavity
+
+~~~text
+source_count: 1
+dtype: bool
+dims: any
+requires: at least one True in every sample
+full_partition: False
+output shape: identical to source
+~~~
+
+Produces a boolean mask containing only False regions that are fully enclosed
+by True values.
+
+Connectivity is axis-adjacent:
+
+~~~text
+1D -> left/right
+2D -> 4-connectivity
+3D -> 6-connectivity
+N-D -> +/- 1 along one axis at a time
+~~~
+
+A False region is a cavity exactly when it cannot reach any boundary cell
+through axis-adjacent False cells.
+
+Examples:
+
+~~~text
+[False, True, False, True, False]
+
+->
+
+[False, False, True, False, False]
+~~~
+
+~~~text
+[False, True, False, False, True]
+
+->
+
+[False, False, True, True, False]
+~~~
+
+~~~text
+[
+    [False, True,  False],
+    [True,  False, True ],
+    [False, True,  False],
+]
+
+->
+
+[
+    [False, False, False],
+    [False, True,  False],
+    [False, False, False],
+]
+~~~
+
+The center remains a cavity even though it is diagonally adjacent to boundary
+False cells, because diagonal adjacency is not used.
+
+A scalar True is valid and produces scalar False. A source sample containing no
+True values is not generation-valid for bool_cavity.
+
+The operation is GP-only.
