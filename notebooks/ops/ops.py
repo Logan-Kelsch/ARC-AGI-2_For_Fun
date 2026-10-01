@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import wraps
 import inspect
+import itertools
 from typing import Any, Callable, Iterable
 
 import numpy as np
@@ -46,7 +47,10 @@ class OperationInfo:
     name: str
     full_partition: bool
     output_count: int
+    source_count: int = 1
+    ordered_sources: bool = True
     min_dims_exclusive: int | None = None
+    allowed_dims: tuple[int, ...] | None = None
     atomic_dtypes: tuple[np.dtype, ...] | None = None
     parameter_sampler: ParameterSampler | None = None
     validator: GenerationValidator | None = None
@@ -68,7 +72,10 @@ def operation(
     *,
     full_partition: bool,
     output_count: int,
+    source_count: int = 1,
+    ordered_sources: bool = True,
     min_dims_exclusive: int | None = None,
+    allowed_dims: Iterable[int] | None = None,
     atomic_dtypes: Iterable[Any] | None = None,
     parameter_sampler: ParameterSampler | None = None,
     validator: GenerationValidator | None = None,
@@ -84,13 +91,28 @@ def operation(
     """
     if output_count < 1:
         raise ValueError("output_count must be >= 1.")
+    if source_count < 1:
+        raise ValueError("source_count must be >= 1.")
+
+    normalized_allowed_dims = (
+        None
+        if allowed_dims is None
+        else tuple(sorted({int(dim) for dim in allowed_dims}))
+    )
+    if normalized_allowed_dims is not None and any(
+        dim < 0 for dim in normalized_allowed_dims
+    ):
+        raise ValueError("allowed_dims must contain non-negative dimensions.")
 
     def decorator(func: Callable):
         info = OperationInfo(
             name=func.__name__,
             full_partition=bool(full_partition),
             output_count=int(output_count),
+            source_count=int(source_count),
+            ordered_sources=bool(ordered_sources),
             min_dims_exclusive=min_dims_exclusive,
+            allowed_dims=normalized_allowed_dims,
             atomic_dtypes=_normalize_dtypes(atomic_dtypes),
             parameter_sampler=parameter_sampler,
             validator=validator,
@@ -104,7 +126,7 @@ def operation(
             bound = signature.bind(meta, X, *args, **kwargs)
             bound.apply_defaults()
 
-            source_idx = int(bound.arguments["source_idx"])
+            source_idx = _normalize_source(bound.arguments["source_idx"])
             params = {
                 name: value
                 for name, value in bound.arguments.items()
@@ -231,14 +253,43 @@ def _freeze_value(value: Any):
     return value
 
 
+def _source_tuple(source_idx: Any) -> tuple[int, ...]:
+    """Normalize one source reference into an index tuple."""
+    normalized = _normalize_source(source_idx)
+    if isinstance(normalized, int):
+        return (normalized,)
+    return tuple(int(index) for index in normalized)
+
+
+def _canonical_source(
+    info: OperationInfo,
+    source_idx: Any,
+):
+    indices = _source_tuple(source_idx)
+
+    if len(indices) != info.source_count:
+        raise ValueError(
+            f"{info.name!r} requires {info.source_count} source gene(s), "
+            f"got {len(indices)}."
+        )
+
+    if not info.ordered_sources and len(indices) > 1:
+        indices = tuple(sorted(indices))
+
+    if info.source_count == 1:
+        return indices[0]
+
+    return indices
+
+
 def _transition_signature(
-    op_name: str,
-    source_idx: int,
+    info: OperationInfo,
+    source_idx: Any,
     params: dict[str, Any] | None,
 ):
     return (
-        str(op_name),
-        _normalize_source(source_idx),
+        info.name,
+        _canonical_source(info, source_idx),
         _freeze_value(params or {}),
     )
 
@@ -388,17 +439,20 @@ def _resolve_operation(
 def generation_exists(
     meta: ProgramMeta,
     op: str | OperationInfo | Callable,
-    source_idx: int,
+    source_idx: Any,
     *,
     params: dict[str, Any] | None = None,
 ) -> bool:
-    """Whether the exact (operation, source, parameters) already exists."""
+    """Whether the exact (operation, source(s), parameters) already exists."""
     info = _resolve_operation(op)
-    candidate = _transition_signature(info.name, source_idx, params)
+    candidate = _transition_signature(info, source_idx, params)
 
     for gidx in range(len(meta)):
+        if meta.op[gidx] != info.name:
+            continue
+
         existing = _transition_signature(
-            meta.op[gidx],
+            info,
             meta.source[gidx],
             meta.params[gidx],
         )
@@ -412,7 +466,7 @@ def generation_invalid_reason(
     meta: ProgramMeta,
     X: ProgramX,
     op: str | OperationInfo | Callable,
-    source_idx: int,
+    source_idx: Any,
     *,
     params: dict[str, Any] | None = None,
 ) -> str | None:
@@ -420,51 +474,60 @@ def generation_invalid_reason(
     _validate_program_pair(meta, X)
     info = _resolve_operation(op)
 
-    if isinstance(source_idx, bool) or not isinstance(
-        source_idx,
-        (int, np.integer),
-    ):
-        return "source_idx must be an integer"
+    try:
+        canonical_source = _canonical_source(info, source_idx)
+        source_tuple = _source_tuple(canonical_source)
+    except (TypeError, ValueError) as exc:
+        return str(exc)
 
-    source_idx = int(source_idx)
-
-    if source_idx < 0 or source_idx >= len(X):
-        return "source_idx is outside the current gene range"
+    for index in source_tuple:
+        if index < 0 or index >= len(X):
+            return f"source index {index} is outside the current gene range"
 
     if meta.side == "SP" and not info.full_partition:
         return "SP may only use full_partition operations"
 
-    source_dims = meta.dims[source_idx]
+    for index in source_tuple:
+        source_dims = meta.dims[index]
 
-    if (
-        info.min_dims_exclusive is not None
-        and source_dims <= info.min_dims_exclusive
-    ):
-        return (
-            f"source dims={source_dims} must be > "
-            f"{info.min_dims_exclusive}"
-        )
-
-    if info.atomic_dtypes is not None:
-        actual_dtypes = set(gene_atomic_dtypes(X, source_idx))
-        allowed_dtypes = set(info.atomic_dtypes)
-
-        if not actual_dtypes:
-            return "source has no atomic dtype"
-
-        if not actual_dtypes.issubset(allowed_dtypes):
+        if (
+            info.min_dims_exclusive is not None
+            and source_dims <= info.min_dims_exclusive
+        ):
             return (
-                "atomic dtype restriction failed: "
-                f"actual={sorted(map(str, actual_dtypes))}, "
-                f"allowed={sorted(map(str, allowed_dtypes))}"
+                f"source gene {index} dims={source_dims} must be > "
+                f"{info.min_dims_exclusive}"
             )
+
+        if (
+            info.allowed_dims is not None
+            and source_dims not in info.allowed_dims
+        ):
+            return (
+                f"source gene {index} dims={source_dims} must be in "
+                f"{info.allowed_dims}"
+            )
+
+        if info.atomic_dtypes is not None:
+            actual_dtypes = set(gene_atomic_dtypes(X, index))
+            allowed_dtypes = set(info.atomic_dtypes)
+
+            if not actual_dtypes:
+                return f"source gene {index} has no atomic dtype"
+
+            if not actual_dtypes.issubset(allowed_dtypes):
+                return (
+                    f"source gene {index} atomic dtype restriction failed: "
+                    f"actual={sorted(map(str, actual_dtypes))}, "
+                    f"allowed={sorted(map(str, allowed_dtypes))}"
+                )
 
     params = _copy_params(params)
 
     if info.validator is not None:
         try:
             allowed = bool(
-                info.validator(meta, X, source_idx, params)
+                info.validator(meta, X, canonical_source, params)
             )
         except Exception as exc:
             return f"custom validator raised {type(exc).__name__}: {exc}"
@@ -475,7 +538,7 @@ def generation_invalid_reason(
     if generation_exists(
         meta,
         info,
-        source_idx,
+        canonical_source,
         params=params,
     ):
         return "exact operation/source/parameter transition already exists"
@@ -487,7 +550,7 @@ def valid_generation(
     meta: ProgramMeta,
     X: ProgramX,
     op: str | OperationInfo | Callable,
-    source_idx: int,
+    source_idx: Any,
     *,
     params: dict[str, Any] | None = None,
 ) -> bool:
@@ -566,6 +629,101 @@ def _validate_source(meta: ProgramMeta, X: ProgramX, source_idx: int) -> int:
         )
 
     return source_idx
+
+
+def _validate_sources(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    *,
+    expected_count: int,
+) -> tuple[int, ...]:
+    _validate_program_pair(meta, X)
+    indices = _source_tuple(source_idx)
+
+    if len(indices) != expected_count:
+        raise ValueError(
+            f"Expected {expected_count} source genes, got {len(indices)}."
+        )
+
+    for index in indices:
+        if index < 0 or index >= len(X):
+            raise IndexError(
+                f"source index {index} is outside {X.side}_X gene range "
+                f"[0, {len(X) - 1}]."
+            )
+
+    return indices
+
+
+def _bool2_same_shape_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    first, second = _source_tuple(source_idx)
+
+    if first == second:
+        return False
+
+    return all(
+        np.asarray(X[first, sample_idx]).shape
+        == np.asarray(X[second, sample_idx]).shape
+        for sample_idx in range(X.sample_count)
+    )
+
+
+def _bool_trim_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    source = _source_tuple(source_idx)[0]
+
+    for sample_idx in range(X.sample_count):
+        array = np.asarray(X[source, sample_idx], dtype=bool)
+
+        if array.ndim == 0 or any(size == 0 for size in array.shape):
+            return False
+
+        removable_boundary = False
+
+        for axis in range(array.ndim):
+            first_slice = np.take(array, 0, axis=axis)
+            last_slice = np.take(array, -1, axis=axis)
+
+            if not np.any(first_slice) or not np.any(last_slice):
+                removable_boundary = True
+                break
+
+        if not removable_boundary:
+            return False
+
+    return True
+
+
+def _trim_bool_array(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return (offset, tight boolean bounding box) for one sample."""
+    array = np.asarray(array, dtype=bool)
+
+    true_coords = np.argwhere(array)
+
+    if true_coords.size == 0:
+        offset = np.zeros(array.ndim, dtype=np.int64)
+        slices = tuple(slice(0, 0) for _ in range(array.ndim))
+        return offset, array[slices].copy()
+
+    starts = true_coords.min(axis=0).astype(np.int64, copy=False)
+    stops = true_coords.max(axis=0) + 1
+
+    slices = tuple(
+        slice(int(start), int(stop))
+        for start, stop in zip(starts, stops)
+    )
+
+    return starts.copy(), array[slices].copy()
 
 
 def _append_gene(
@@ -676,6 +834,266 @@ def partition_composite(
     return color_gidx, presence_gidx
 
 
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    atomic_dtypes=(np.bool_,),
+)
+def bool_complement(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Boolean complement preserving the complete source shape."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.logical_not(np.asarray(value, dtype=bool))
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="bool_complement",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    source_count=2,
+    ordered_sources=False,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool2_same_shape_validator,
+)
+def bool2_union(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: tuple[int, int],
+) -> int:
+    """Elementwise boolean union of two same-shaped boolean genes."""
+    first, second = sorted(
+        _validate_sources(
+            meta,
+            X,
+            source_idx,
+            expected_count=2,
+        )
+    )
+    source = (first, second)
+
+    values = [
+        np.logical_or(
+            np.asarray(X[first, sample_idx], dtype=bool),
+            np.asarray(X[second, sample_idx], dtype=bool),
+        )
+        for sample_idx in range(X.sample_count)
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source,
+        op_name="bool2_union",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    source_count=2,
+    ordered_sources=False,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool2_same_shape_validator,
+)
+def bool2_intersect(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: tuple[int, int],
+) -> int:
+    """Elementwise boolean intersection of two same-shaped boolean genes."""
+    first, second = sorted(
+        _validate_sources(
+            meta,
+            X,
+            source_idx,
+            expected_count=2,
+        )
+    )
+    source = (first, second)
+
+    values = [
+        np.logical_and(
+            np.asarray(X[first, sample_idx], dtype=bool),
+            np.asarray(X[second, sample_idx], dtype=bool),
+        )
+        for sample_idx in range(X.sample_count)
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source,
+        op_name="bool2_intersect",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    allowed_dims=(2,),
+)
+def mat2_cwrotate(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Rotate every 2D sample clockwise by 90 degrees."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.rot90(np.asarray(value), k=-1).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="mat2_cwrotate",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    min_dims_exclusive=0,
+)
+def dim0_flip(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Reverse values along dimension 0."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.flip(np.asarray(value), axis=0).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="dim0_flip",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    min_dims_exclusive=1,
+)
+def dim1_flip(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Reverse values along dimension 1."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.flip(np.asarray(value), axis=1).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="dim1_flip",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    min_dims_exclusive=2,
+)
+def dim2_flip(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Reverse values along dimension 2."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.flip(np.asarray(value), axis=2).copy()
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="dim2_flip",
+    )
+
+
+@operation(
+    full_partition=True,
+    output_count=2,
+    min_dims_exclusive=0,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool_trim_validator,
+)
+def partition_bool_trim(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> tuple[int, int]:
+    """Partition a boolean gene into offset and tight remaining structure."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    offsets = []
+    trimmed_values = []
+
+    for value in X[source_idx]:
+        offset, trimmed = _trim_bool_array(
+            np.asarray(value, dtype=bool)
+        )
+        offsets.append(offset)
+        trimmed_values.append(trimmed)
+
+    offset_gidx = _append_gene(
+        meta,
+        X,
+        offsets,
+        source=source_idx,
+        op_name="partition_bool_trim",
+    )
+    data_gidx = _append_gene(
+        meta,
+        X,
+        trimmed_values,
+        source=source_idx,
+        op_name="partition_bool_trim",
+    )
+
+    return offset_gidx, data_gidx
+
 def _rng(
     rng: np.random.Generator | int | None,
 ) -> np.random.Generator:
@@ -712,10 +1130,32 @@ def _eligible_operation_infos(
 
 def _candidate_signature(
     info: OperationInfo,
-    source_idx: int,
+    source_idx: Any,
     params: dict[str, Any] | None,
 ):
-    return _transition_signature(info.name, source_idx, params)
+    return _transition_signature(info, source_idx, params)
+
+
+def _source_candidates(
+    info: OperationInfo,
+    gene_count: int,
+) -> list[Any]:
+    """Enumerate legal source-index tuples for one operation arity."""
+    if info.source_count == 1:
+        return list(range(gene_count))
+
+    indices = range(gene_count)
+
+    if info.ordered_sources:
+        return [
+            tuple(source)
+            for source in itertools.permutations(indices, info.source_count)
+        ]
+
+    return [
+        tuple(source)
+        for source in itertools.combinations(indices, info.source_count)
+    ]
 
 
 def _parameterless_valid_candidates(
@@ -740,7 +1180,7 @@ def _parameterless_valid_candidates(
         if info.parameter_sampler is not None:
             continue
 
-        for source_idx in range(len(X)):
+        for source_idx in _source_candidates(info, len(X)):
             params: dict[str, Any] = {}
             signature = _candidate_signature(info, source_idx, params)
 
@@ -800,7 +1240,10 @@ def _random_parameterized_candidate(
 
     for _ in range(max_attempts):
         info = infos[int(rng.integers(len(infos)))]
-        source_idx = int(rng.integers(len(X)))
+        source_space = _source_candidates(info, len(X))
+        if not source_space:
+            continue
+        source_idx = source_space[int(rng.integers(len(source_space)))]
         params = sample_operation_params(info, rng)
         signature = _candidate_signature(info, source_idx, params)
 
@@ -894,7 +1337,7 @@ def _try_candidate_transactionally(
     meta: ProgramMeta,
     X: ProgramX,
     info: OperationInfo,
-    source_idx: int,
+    source_idx: Any,
     params: dict[str, Any],
 ) -> tuple[list[int], str | None]:
     """Apply one candidate and keep it only when all outputs are novel."""

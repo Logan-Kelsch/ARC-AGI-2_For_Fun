@@ -13,11 +13,19 @@ from notebooks.ops.ops import (
     GP_generate,
     OP_REGISTRY,
     SP_generate,
+    bool2_intersect,
+    bool2_union,
+    bool_complement,
+    dim0_flip,
+    dim1_flip,
+    dim2_flip,
     equivalent_gene_idx,
     generation_exists,
     gene_atomic_dtypes,
     genes_exactly_equal,
+    mat2_cwrotate,
     operation,
+    partition_bool_trim,
     partition_composite,
     partition_shape,
     valid_generation,
@@ -763,3 +771,359 @@ def test_sp_generation_rolls_back_duplicate_data_and_reports_exhaustion(capsys):
     )
 
     OP_REGISTRY.pop("test_sp_identity", None)
+
+
+
+def test_bool_complement_accepts_boolean_any_dim_and_complements_all_values():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array([True, False, True], dtype=bool),
+            np.array([False, False], dtype=bool),
+        ],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, bool_complement, 0)
+
+    gidx = bool_complement(meta, X, 0)
+
+    assert meta.source[gidx] == 0
+    assert meta.dims[gidx] == 1
+    assert np.array_equal(
+        X[gidx, 0],
+        np.array([False, True, False], dtype=bool),
+    )
+    assert np.array_equal(
+        X[gidx, 1],
+        np.array([True, True], dtype=bool),
+    )
+
+
+def test_bool_complement_rejects_non_boolean_gene():
+    meta, X = _raw_program(
+        "GP",
+        [np.array([0, 1], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    assert not valid_generation(meta, X, bool_complement, 0)
+
+
+def _two_bool_gene_program(first_values, second_values):
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=len(first_values))
+
+    first = X.append_gene(first_values)
+    meta.append(source=-1, op="raw_a", dims=np.asarray(first_values[0]).ndim)
+
+    second = X.append_gene(second_values)
+    meta.append(source=-1, op="raw_b", dims=np.asarray(second_values[0]).ndim)
+
+    return meta, X, first, second
+
+
+def test_bool2_union_and_intersection_use_two_same_shaped_boolean_sources():
+    meta, X, first, second = _two_bool_gene_program(
+        [
+            np.array([[True, False], [False, True]], dtype=bool),
+            np.array([[True, False]], dtype=bool),
+        ],
+        [
+            np.array([[False, True], [False, True]], dtype=bool),
+            np.array([[False, True]], dtype=bool),
+        ],
+    )
+
+    assert valid_generation(meta, X, bool2_union, (first, second))
+    assert valid_generation(meta, X, bool2_intersect, (first, second))
+
+    union_gidx = bool2_union(meta, X, (first, second))
+    intersect_gidx = bool2_intersect(meta, X, (first, second))
+
+    assert meta.source[union_gidx] == (first, second)
+    assert meta.source[intersect_gidx] == (first, second)
+
+    assert np.array_equal(
+        X[union_gidx, 0],
+        np.array([[True, True], [False, True]], dtype=bool),
+    )
+    assert np.array_equal(
+        X[intersect_gidx, 0],
+        np.array([[False, False], [False, True]], dtype=bool),
+    )
+
+    assert np.array_equal(
+        X[union_gidx, 1],
+        np.array([[True, True]], dtype=bool),
+    )
+    assert np.array_equal(
+        X[intersect_gidx, 1],
+        np.array([[False, False]], dtype=bool),
+    )
+
+
+def test_bool2_ops_reject_mismatched_shape_or_nonboolean_source():
+    meta, X, first, second = _two_bool_gene_program(
+        [np.array([True, False], dtype=bool)],
+        [np.array([[True, False]], dtype=bool)],
+    )
+
+    assert not valid_generation(meta, X, bool2_union, (first, second))
+    assert not valid_generation(meta, X, bool2_intersect, (first, second))
+
+    third = X.append_gene([np.array([1, 0], dtype=np.int64)])
+    meta.append(source=-1, op="raw_int", dims=1)
+
+    assert not valid_generation(meta, X, bool2_union, (first, third))
+
+
+def test_bool2_commutative_source_order_counts_as_same_transition():
+    meta, X, first, second = _two_bool_gene_program(
+        [np.array([True, False], dtype=bool)],
+        [np.array([False, True], dtype=bool)],
+    )
+
+    bool2_union(meta, X, (first, second))
+
+    assert generation_exists(meta, bool2_union, (second, first))
+    assert not valid_generation(meta, X, bool2_union, (second, first))
+
+
+def test_mat2_cwrotate_rotates_any_dtype_clockwise():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array(
+                [
+                    [1, 2, 3],
+                    [4, 5, 6],
+                ],
+                dtype=np.int64,
+            )
+        ],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, mat2_cwrotate, 0)
+
+    gidx = mat2_cwrotate(meta, X, 0)
+
+    assert np.array_equal(
+        X[gidx, 0],
+        np.array(
+            [
+                [4, 1],
+                [5, 2],
+                [6, 3],
+            ],
+            dtype=np.int64,
+        ),
+    )
+
+
+def test_mat2_cwrotate_rejects_non_2d_gene():
+    meta, X = _raw_program(
+        "GP",
+        [np.ones((2, 2, 2), dtype=bool)],
+        raw_op="raw_input",
+    )
+
+    assert not valid_generation(meta, X, mat2_cwrotate, 0)
+
+
+def test_dim_flips_apply_to_requested_axis_and_enforce_minimum_dims():
+    array = np.arange(24, dtype=np.int64).reshape(2, 3, 4)
+    meta, X = _raw_program(
+        "GP",
+        [array],
+        raw_op="raw_input",
+    )
+
+    g0 = dim0_flip(meta, X, 0)
+    g1 = dim1_flip(meta, X, 0)
+    g2 = dim2_flip(meta, X, 0)
+
+    assert np.array_equal(X[g0, 0], np.flip(array, axis=0))
+    assert np.array_equal(X[g1, 0], np.flip(array, axis=1))
+    assert np.array_equal(X[g2, 0], np.flip(array, axis=2))
+
+    vector_meta, vector_X = _raw_program(
+        "GP",
+        [np.array([1, 2], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(vector_meta, vector_X, dim0_flip, 0)
+    assert not valid_generation(vector_meta, vector_X, dim1_flip, 0)
+    assert not valid_generation(vector_meta, vector_X, dim2_flip, 0)
+
+
+def test_partition_bool_trim_1d_returns_offset_and_trimmed_structure():
+    meta, X = _raw_program(
+        "GP",
+        [np.array([False, True, True], dtype=bool)],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, partition_bool_trim, 0)
+
+    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+
+    assert np.array_equal(
+        X[offset_gidx, 0],
+        np.array([1], dtype=np.int64),
+    )
+    assert np.array_equal(
+        X[data_gidx, 0],
+        np.array([True, True], dtype=bool),
+    )
+    assert meta.dims[offset_gidx] == 1
+    assert meta.dims[data_gidx] == 1
+
+
+def test_partition_bool_trim_2d_matches_requested_example():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array(
+                [
+                    [False, False],
+                    [False, True],
+                ],
+                dtype=bool,
+            )
+        ],
+        raw_op="raw_input",
+    )
+
+    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+
+    assert np.array_equal(
+        X[offset_gidx, 0],
+        np.array([1, 1], dtype=np.int64),
+    )
+    assert np.array_equal(
+        X[data_gidx, 0],
+        np.array([[True]], dtype=bool),
+    )
+
+
+def test_partition_bool_trim_finds_nd_boolean_bounding_box():
+    source = np.zeros((4, 5, 6), dtype=bool)
+    source[1:3, 2:4, 1:5] = True
+
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+
+    assert np.array_equal(
+        X[offset_gidx, 0],
+        np.array([1, 2, 1], dtype=np.int64),
+    )
+    assert X[data_gidx, 0].shape == (2, 2, 4)
+    assert np.all(X[data_gidx, 0])
+
+
+def test_partition_bool_trim_requires_bool_dim_gt_zero_and_trim_boundary():
+    tight_meta, tight_X = _raw_program(
+        "GP",
+        [np.array([[True, True], [True, True]], dtype=bool)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        tight_meta,
+        tight_X,
+        partition_bool_trim,
+        0,
+    )
+
+    int_meta, int_X = _raw_program(
+        "GP",
+        [np.array([[0, 1]], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        int_meta,
+        int_X,
+        partition_bool_trim,
+        0,
+    )
+
+    scalar_meta = ProgramMeta(side="GP")
+    scalar_X = ProgramX(side="GP", sample_count=1)
+    scalar_X.append_gene([np.bool_(True)])
+    scalar_meta.append(source=-1, op="raw_bool", dims=0)
+
+    assert not valid_generation(
+        scalar_meta,
+        scalar_X,
+        partition_bool_trim,
+        0,
+    )
+
+
+def test_partition_bool_trim_all_false_returns_empty_nd_structure():
+    source = np.zeros((2, 3), dtype=bool)
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+
+    assert np.array_equal(
+        X[offset_gidx, 0],
+        np.array([0, 0], dtype=np.int64),
+    )
+    assert X[data_gidx, 0].shape == (0, 0)
+    assert X[data_gidx, 0].dtype == bool
+
+
+def test_only_partition_bool_trim_is_sp_legal_among_new_ops():
+    full_partition_names = {
+        name
+        for name in (
+            "bool_complement",
+            "bool2_union",
+            "bool2_intersect",
+            "mat2_cwrotate",
+            "dim0_flip",
+            "dim1_flip",
+            "dim2_flip",
+            "partition_bool_trim",
+        )
+        if OP_REGISTRY[name].full_partition
+    }
+
+    assert full_partition_names == {"partition_bool_trim"}
+
+
+def test_gp_generate_can_discover_binary_boolean_operation():
+    meta, X, first, second = _two_bool_gene_program(
+        [
+            np.array([True, False, False], dtype=bool),
+            np.array([False, True, False], dtype=bool),
+        ],
+        [
+            np.array([False, True, False], dtype=bool),
+            np.array([True, False, False], dtype=bool),
+        ],
+    )
+
+    created = GP_generate(
+        meta,
+        X,
+        1,
+        rng=0,
+        operation_names=("bool2_union",),
+    )
+
+    assert len(created) == 1
+    assert meta.op[created[0]] == "bool2_union"
+    assert meta.source[created[0]] == (first, second)
