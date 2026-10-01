@@ -474,6 +474,7 @@ def test_gp_generate_adds_requested_number_of_new_genes_without_duplicate_transi
         GP_X,
         5,
         rng=7,
+        operation_names=("partition_shape", "partition_composite"),
     )
 
     assert len(new_gidx) == 5
@@ -521,6 +522,7 @@ def test_sp_generate_runs_one_full_partition_step_and_syncs_st():
         SP_X,
         ST,
         rng=11,
+        operation_names=("partition_shape", "partition_composite"),
     )
 
     assert len(new_gidx) >= 1
@@ -584,6 +586,7 @@ def test_parameter_sampler_supports_future_integer_parameter_ops():
         X,
         3,
         rng=123,
+        operation_names=("test_param_op",),
     )
 
     assert len(created) == 3
