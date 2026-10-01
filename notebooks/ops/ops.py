@@ -894,6 +894,34 @@ def _append_gene(
     return gidx
 
 
+def _partition_composite_colors(
+    X: ProgramX,
+    source_idx: int,
+) -> np.ndarray:
+    """Sorted union of categorical colors used across all samples."""
+    colors = [
+        np.asarray(value).reshape(-1)
+        for value in X[source_idx]
+    ]
+
+    if not colors:
+        return np.empty(0, dtype=np.int64)
+
+    return np.unique(
+        np.concatenate(colors)
+    ).astype(np.int64, copy=False)
+
+
+def _partition_composite_output_count(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> int:
+    source = _source_tuple(source_idx)[0]
+    return 2 * len(_partition_composite_colors(X, source))
+
+
 @operation(
     full_partition=True,
     output_count=1,
@@ -923,7 +951,8 @@ def partition_shape(
 
 @operation(
     full_partition=True,
-    output_count=2,
+    output_count=None,
+    output_count_estimator=_partition_composite_output_count,
     min_dims_exclusive=1,
     atomic_dtypes=(np.int64,),
 )
@@ -931,48 +960,53 @@ def partition_composite(
     meta: ProgramMeta,
     X: ProgramX,
     source_idx: int,
-) -> tuple[int, int]:
-    """Partition an integer categorical grid into IDs and presence masks."""
+) -> tuple[int, ...]:
+    """Partition a categorical grid into one ID/mask pair per used color.
+
+    The color set is the sorted union observed across all training samples.
+    For each color, two gene-major outputs are created:
+
+      1. scalar np.int64 color ID, constant across samples;
+      2. 2D boolean presence mask for that color in each sample.
+
+    If a color is absent from one sample, its presence value for that sample is
+    an all-False matrix with the same spatial shape as the source sample.
+    """
     source_idx = _validate_source(meta, X, source_idx)
+    colors = _partition_composite_colors(X, source_idx)
 
-    color_values = []
-    presence_values = []
+    generated: list[int] = []
 
-    for sample_idx, value in enumerate(X[source_idx]):
-        array = np.asarray(value)
+    for color in colors:
+        color = np.int64(color)
 
-        if array.ndim < 2:
-            raise ValueError(
-                "partition_composite requires source dims > 1; "
-                f"sample {sample_idx} has shape {array.shape}."
-            )
+        color_values = [
+            np.int64(color)
+            for _ in range(X.sample_count)
+        ]
+        presence_values = [
+            (np.asarray(value) == color).astype(bool, copy=False)
+            for value in X[source_idx]
+        ]
 
-        colors = np.unique(array)
+        color_gidx = _append_gene(
+            meta,
+            X,
+            color_values,
+            source=source_idx,
+            op_name="partition_composite",
+        )
+        presence_gidx = _append_gene(
+            meta,
+            X,
+            presence_values,
+            source=source_idx,
+            op_name="partition_composite",
+        )
 
-        presence = np.stack(
-            [array == color for color in colors],
-            axis=0,
-        ).astype(bool, copy=False)
+        generated.extend([color_gidx, presence_gidx])
 
-        color_values.append(colors.astype(np.int64, copy=False))
-        presence_values.append(presence)
-
-    color_gidx = _append_gene(
-        meta,
-        X,
-        color_values,
-        source=source_idx,
-        op_name="partition_composite",
-    )
-    presence_gidx = _append_gene(
-        meta,
-        X,
-        presence_values,
-        source=source_idx,
-        op_name="partition_composite",
-    )
-
-    return color_gidx, presence_gidx
+    return tuple(generated)
 
 
 
