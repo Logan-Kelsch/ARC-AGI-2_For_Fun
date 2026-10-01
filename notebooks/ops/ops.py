@@ -253,14 +253,43 @@ def _freeze_value(value: Any):
     return value
 
 
+def _source_tuple(source_idx: Any) -> tuple[int, ...]:
+    """Normalize one source reference into an index tuple."""
+    normalized = _normalize_source(source_idx)
+    if isinstance(normalized, int):
+        return (normalized,)
+    return tuple(int(index) for index in normalized)
+
+
+def _canonical_source(
+    info: OperationInfo,
+    source_idx: Any,
+):
+    indices = _source_tuple(source_idx)
+
+    if len(indices) != info.source_count:
+        raise ValueError(
+            f"{info.name!r} requires {info.source_count} source gene(s), "
+            f"got {len(indices)}."
+        )
+
+    if not info.ordered_sources and len(indices) > 1:
+        indices = tuple(sorted(indices))
+
+    if info.source_count == 1:
+        return indices[0]
+
+    return indices
+
+
 def _transition_signature(
-    op_name: str,
-    source_idx: int,
+    info: OperationInfo,
+    source_idx: Any,
     params: dict[str, Any] | None,
 ):
     return (
-        str(op_name),
-        _normalize_source(source_idx),
+        info.name,
+        _canonical_source(info, source_idx),
         _freeze_value(params or {}),
     )
 
@@ -410,17 +439,20 @@ def _resolve_operation(
 def generation_exists(
     meta: ProgramMeta,
     op: str | OperationInfo | Callable,
-    source_idx: int,
+    source_idx: Any,
     *,
     params: dict[str, Any] | None = None,
 ) -> bool:
-    """Whether the exact (operation, source, parameters) already exists."""
+    """Whether the exact (operation, source(s), parameters) already exists."""
     info = _resolve_operation(op)
-    candidate = _transition_signature(info.name, source_idx, params)
+    candidate = _transition_signature(info, source_idx, params)
 
     for gidx in range(len(meta)):
+        if meta.op[gidx] != info.name:
+            continue
+
         existing = _transition_signature(
-            meta.op[gidx],
+            info,
             meta.source[gidx],
             meta.params[gidx],
         )
@@ -434,7 +466,7 @@ def generation_invalid_reason(
     meta: ProgramMeta,
     X: ProgramX,
     op: str | OperationInfo | Callable,
-    source_idx: int,
+    source_idx: Any,
     *,
     params: dict[str, Any] | None = None,
 ) -> str | None:
@@ -442,51 +474,60 @@ def generation_invalid_reason(
     _validate_program_pair(meta, X)
     info = _resolve_operation(op)
 
-    if isinstance(source_idx, bool) or not isinstance(
-        source_idx,
-        (int, np.integer),
-    ):
-        return "source_idx must be an integer"
+    try:
+        canonical_source = _canonical_source(info, source_idx)
+        source_tuple = _source_tuple(canonical_source)
+    except (TypeError, ValueError) as exc:
+        return str(exc)
 
-    source_idx = int(source_idx)
-
-    if source_idx < 0 or source_idx >= len(X):
-        return "source_idx is outside the current gene range"
+    for index in source_tuple:
+        if index < 0 or index >= len(X):
+            return f"source index {index} is outside the current gene range"
 
     if meta.side == "SP" and not info.full_partition:
         return "SP may only use full_partition operations"
 
-    source_dims = meta.dims[source_idx]
+    for index in source_tuple:
+        source_dims = meta.dims[index]
 
-    if (
-        info.min_dims_exclusive is not None
-        and source_dims <= info.min_dims_exclusive
-    ):
-        return (
-            f"source dims={source_dims} must be > "
-            f"{info.min_dims_exclusive}"
-        )
-
-    if info.atomic_dtypes is not None:
-        actual_dtypes = set(gene_atomic_dtypes(X, source_idx))
-        allowed_dtypes = set(info.atomic_dtypes)
-
-        if not actual_dtypes:
-            return "source has no atomic dtype"
-
-        if not actual_dtypes.issubset(allowed_dtypes):
+        if (
+            info.min_dims_exclusive is not None
+            and source_dims <= info.min_dims_exclusive
+        ):
             return (
-                "atomic dtype restriction failed: "
-                f"actual={sorted(map(str, actual_dtypes))}, "
-                f"allowed={sorted(map(str, allowed_dtypes))}"
+                f"source gene {index} dims={source_dims} must be > "
+                f"{info.min_dims_exclusive}"
             )
+
+        if (
+            info.allowed_dims is not None
+            and source_dims not in info.allowed_dims
+        ):
+            return (
+                f"source gene {index} dims={source_dims} must be in "
+                f"{info.allowed_dims}"
+            )
+
+        if info.atomic_dtypes is not None:
+            actual_dtypes = set(gene_atomic_dtypes(X, index))
+            allowed_dtypes = set(info.atomic_dtypes)
+
+            if not actual_dtypes:
+                return f"source gene {index} has no atomic dtype"
+
+            if not actual_dtypes.issubset(allowed_dtypes):
+                return (
+                    f"source gene {index} atomic dtype restriction failed: "
+                    f"actual={sorted(map(str, actual_dtypes))}, "
+                    f"allowed={sorted(map(str, allowed_dtypes))}"
+                )
 
     params = _copy_params(params)
 
     if info.validator is not None:
         try:
             allowed = bool(
-                info.validator(meta, X, source_idx, params)
+                info.validator(meta, X, canonical_source, params)
             )
         except Exception as exc:
             return f"custom validator raised {type(exc).__name__}: {exc}"
@@ -497,7 +538,7 @@ def generation_invalid_reason(
     if generation_exists(
         meta,
         info,
-        source_idx,
+        canonical_source,
         params=params,
     ):
         return "exact operation/source/parameter transition already exists"
