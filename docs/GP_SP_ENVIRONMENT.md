@@ -548,3 +548,157 @@ Parameterized operations whose sampler has an effectively unbounded parameter
 domain cannot honestly be called exhaustively searched. Those retain bounded
 sampling behavior and print a separate sampled-parameter-space termination
 message if no novel output is found.
+
+
+## Boolean and spatial operation expansion
+
+The operation registry now supports source arity directly.
+
+~~~python
+@operation(
+    source_count=2,
+    ordered_sources=False,
+    ...
+)
+~~~
+
+allows a transformation to consume multiple GP genes.
+
+For commutative operations such as boolean union/intersection,
+ordered_sources=False canonicalizes the source pair so:
+
+~~~text
+op(source=(4, 7))
+op(source=(7, 4))
+~~~
+
+are the same transformation signature.
+
+Generation enumerates source combinations automatically, so binary operations
+participate in GP_generate without custom search code.
+
+The registry also supports exact dimensional restrictions through:
+
+~~~python
+allowed_dims=(2,)
+~~~
+
+in addition to the existing dims > N rule.
+
+### bool_complement
+
+~~~text
+source_count: 1
+dtype: bool
+dims: any
+full_partition: False
+~~~
+
+Computes the boolean complement of the complete source tensor while preserving
+its shape.
+
+### bool2_union
+
+~~~text
+source_count: 2
+dtype: bool for both sources
+shape: identical per sample
+dims: any
+sources: unordered / commutative
+full_partition: False
+~~~
+
+Computes elementwise logical OR.
+
+### bool2_intersect
+
+Same constraints as bool2_union, but computes elementwise logical AND.
+
+### mat2_cwrotate
+
+~~~text
+source_count: 1
+dims: exactly 2
+dtype: unrestricted
+full_partition: False
+~~~
+
+Rotates each instantiated matrix clockwise by 90 degrees.
+
+### dim0_flip
+
+~~~text
+dims > 0
+dtype unrestricted
+~~~
+
+Reverses values along axis 0.
+
+### dim1_flip
+
+~~~text
+dims > 1
+dtype unrestricted
+~~~
+
+Reverses values along axis 1.
+
+### dim2_flip
+
+~~~text
+dims > 2
+dtype unrestricted
+~~~
+
+Reverses values along axis 2.
+
+### partition_bool_trim
+
+~~~text
+source_count: 1
+dtype: bool
+dims > 0
+full_partition: True
+output_count: 2
+~~~
+
+The operation is valid only when every training sample has at least one
+all-False first or last boundary slice along at least one dimension.
+
+For each sample it computes the tight N-dimensional bounding box containing all
+True entries.
+
+It produces:
+
+~~~text
+gene 1: int64 offset vector, one start index per dimension
+gene 2: trimmed boolean structure
+~~~
+
+Examples:
+
+~~~text
+[False, True, True]
+
+-> offset  [1]
+-> data    [True, True]
+~~~
+
+and:
+
+~~~text
+[
+    [False, False],
+    [False, True]
+]
+
+-> offset  [1, 1]
+-> data    [[True]]
+~~~
+
+For an all-False source, the offset is all zeros and the remaining structure is
+empty along every dimension.
+
+Because partition_bool_trim is marked full_partition=True, it is the only one
+of this new operation group that SP_generate may use. The boolean set
+operations, rotations, and flips remain GP-only transformations.
