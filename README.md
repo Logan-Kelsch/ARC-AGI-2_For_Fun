@@ -190,20 +190,62 @@ GP may use any registered operation. SP rejects NULL operations.
 ### partition_shape
 
 ~~~python
-gidx = partition_shape(
+h_gidx, w_gidx = partition_shape(
     meta,
     X,
     source_idx,
 )
 ~~~
 
-For a 2D grid:
+For a 2D grid, shape is now split into two scalar genes:
 
 ~~~text
-grid -> [height, width]
+grid -> height
+     -> width
 ~~~
 
-This creates one 1D gene.
+Both are required, so the SP proof represents shape as:
+
+~~~text
+shape = h AND w
+~~~
+
+### indiv_1dim
+
+~~~python
+element_gidxs = indiv_1dim(
+    meta,
+    X,
+    source_idx,
+)
+~~~
+
+For a source that is exactly 1D and length L across every sample, this creates
+L scalar genes, one per element position.
+
+~~~text
+[a, b, c]
+->
+a
+b
+c
+~~~
+
+It is an AND partition. On SP, the original source remains an OR alternative:
+
+~~~text
+source
+OR
+(
+    inv_indiv_1dim
+    AND element_0
+    AND element_1
+    AND ...
+)
+~~~
+
+The source length must be identical across samples so each generated gene index
+has one stable positional meaning.
 
 ### partition_composite
 
@@ -254,6 +296,7 @@ SP_X[0] = output grids across training samples
 ~~~
 
 Then partition_shape and partition_composite are applied to gene 0 on both sides.
+partition_shape creates scalar h and w genes.
 
 The initial program layout is variable-length:
 
@@ -261,15 +304,16 @@ The initial program layout is variable-length:
 gidx   operation                source   dims
 
 0      raw_input/raw_output     -1       2
-1      partition_shape           0       1
-2      partition_composite       0       0   first color ID
-3      partition_composite       0       2   first color mask
-4      partition_composite       0       0   second color ID
-5      partition_composite       0       2   second color mask
+1      partition_shape           0       0   h
+2      partition_shape           0       0   w
+3      partition_composite       0       0   first color ID
+4      partition_composite       0       2   first color mask
+5      partition_composite       0       0   second color ID
+6      partition_composite       0       2   second color mask
 ...    ...                        ...     ...
 ~~~
 
-For C distinct colors, that side starts with `2 + 2*C` genes. ST is built
+For C distinct colors, that side starts with `3 + 2*C` genes. ST is built
 directly from the resulting SP structure, and every node begins unresolved with
 gp_gidx=-1.
 

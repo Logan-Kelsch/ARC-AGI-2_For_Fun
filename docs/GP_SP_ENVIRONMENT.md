@@ -170,23 +170,26 @@ result does not provide a valid reversible proof of the source.
 ### partition_shape
 
 ~~~python
-gidx = partition_shape(meta, X, source_idx)
+h_gidx, w_gidx = partition_shape(meta, X, source_idx)
 ~~~
 
-For each sample, this transforms the selected source into its shape vector.
-
-For a 2D grid:
+For a 2D source it generates two scalar np.int64 genes:
 
 ~~~text
-[[...],
- [...]]
-
-->
-
-[height, width]
+height
+width
 ~~~
 
-It generates one gene with dims=1.
+Both have dims=0.
+
+On ST, shape is represented as:
+
+~~~text
+shape = h AND w
+~~~
+
+and inv_partition_shape(h, w, composite) verifies that the reconstructed
+composite has the solved dimensions.
 
 ### partition_composite
 
@@ -256,18 +259,19 @@ creates one pair per distinct color:
 gidx   op                     source   dims
 
 0      raw_input/output       -1       2
-1      partition_shape         0       1
-2      partition_composite     0       0   first color ID
-3      partition_composite     0       2   first color presence
-4      partition_composite     0       0   second color ID
-5      partition_composite     0       2   second color presence
+1      partition_shape         0       0   h
+2      partition_shape         0       0   w
+3      partition_composite     0       0   first color ID
+4      partition_composite     0       2   first color presence
+5      partition_composite     0       0   second color ID
+6      partition_composite     0       2   second color presence
 ...    ...                      ...     ...
 ~~~
 
 For C distinct colors, initialization creates:
 
 ~~~text
-2 + 2*C total genes
+3 + 2*C total genes
 ~~~
 
 on that side.
@@ -371,7 +375,7 @@ The initial operations are configured as follows.
 partition_shape:
 
 ~~~text
-source dims > 0
+source dims == 2
 dtype unrestricted
 ~~~
 
@@ -920,7 +924,7 @@ and are registered in INV_OP_REGISTRY.
 Important examples:
 
 ~~~python
-inv_partition_shape(shape, composite)
+inv_partition_shape(h, w, composite)
 inv_partition_composite(color0, mask0, color1, mask1, ...)
 inv_bool_complement(value)
 inv_mat2_cwrotate(value)
@@ -932,3 +936,49 @@ inv_dim2_flip(value)
 NULL operations also have relation-checking inverse helpers for completeness,
 but those inverses are marked non-reconstructive and are never used by ST as
 solution branches.
+
+
+## indiv_1dim
+
+~~~text
+source_count: 1
+dims: exactly 1
+dtype: unrestricted
+partition: and
+output_count: dynamic = source length L
+inverse: inv_indiv_1dim
+~~~
+
+indiv_1dim splits a one-dimensional gene into one scalar gene per element
+position.
+
+~~~text
+[a, b, c]
+
+-> scalar a
+-> scalar b
+-> scalar c
+~~~
+
+Every training sample must have the same 1D length so generated position k has
+the same semantic meaning across all samples.
+
+On SP this creates the proof alternative:
+
+~~~text
+source
+OR
+(
+    inv_indiv_1dim
+    AND element_0
+    AND element_1
+    AND ...
+    AND element_L-1
+)
+~~~
+
+Therefore all generated element genes are jointly required to reconstruct the
+source through the known inverse.
+
+inv_indiv_1dim simply reassembles the scalar elements in positional order into
+the original 1D NumPy array.

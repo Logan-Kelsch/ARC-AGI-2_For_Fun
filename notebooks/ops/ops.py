@@ -942,32 +942,117 @@ def _partition_composite_output_count(
     return 2 * len(_partition_composite_colors(X, source))
 
 
+def _indiv_1dim_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    """Require one consistent 1D length across all samples."""
+    source = _source_tuple(source_idx)[0]
+
+    lengths = [
+        len(np.asarray(value))
+        for value in X[source]
+    ]
+
+    return bool(lengths) and len(set(lengths)) == 1 and lengths[0] > 0
+
+
+def _indiv_1dim_output_count(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> int:
+    source = _source_tuple(source_idx)[0]
+    array = np.asarray(X[source, 0])
+
+    # Candidate enumeration can ask for output count before dimensional
+    # validity is checked. Invalid sources return a harmless placeholder count
+    # and are rejected immediately afterward by valid_generation.
+    if array.ndim != 1 or len(array) == 0:
+        return 1
+
+    return len(array)
+
+
 @operation(
     partition="and",
     inverse_op="inv_partition_shape",
-    output_count=1,
-    min_dims_exclusive=0,
+    output_count=2,
+    allowed_dims=(2,),
 )
 def partition_shape(
     meta: ProgramMeta,
     X: ProgramX,
     source_idx: int,
-) -> int:
-    """Partition one non-scalar gene into its per-sample shape vectors."""
+) -> tuple[int, int]:
+    """Partition a 2D source into scalar height and width genes."""
     source_idx = _validate_source(meta, X, source_idx)
 
-    shapes = [
-        np.asarray(np.asarray(value).shape, dtype=np.int64)
+    heights = [
+        np.int64(np.asarray(value).shape[0])
+        for value in X[source_idx]
+    ]
+    widths = [
+        np.int64(np.asarray(value).shape[1])
         for value in X[source_idx]
     ]
 
-    return _append_gene(
+    h_gidx = _append_gene(
         meta,
         X,
-        shapes,
+        heights,
         source=source_idx,
         op_name="partition_shape",
     )
+    w_gidx = _append_gene(
+        meta,
+        X,
+        widths,
+        source=source_idx,
+        op_name="partition_shape",
+    )
+
+    return h_gidx, w_gidx
+
+
+@operation(
+    partition="and",
+    inverse_op="inv_indiv_1dim",
+    output_count=None,
+    output_count_estimator=_indiv_1dim_output_count,
+    allowed_dims=(1,),
+    validator=_indiv_1dim_validator,
+)
+def indiv_1dim(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> tuple[int, ...]:
+    """Partition a 1D source into one scalar gene per element position."""
+    source_idx = _validate_source(meta, X, source_idx)
+    length = len(np.asarray(X[source_idx, 0]))
+
+    generated: list[int] = []
+
+    for position in range(length):
+        values = [
+            np.asarray(value)[position]
+            for value in X[source_idx]
+        ]
+
+        gidx = _append_gene(
+            meta,
+            X,
+            values,
+            source=source_idx,
+            op_name="indiv_1dim",
+        )
+        generated.append(gidx)
+
+    return tuple(generated)
 
 
 @operation(

@@ -11,6 +11,7 @@ from notebooks.ops.inv_ops import (
     inv_dim0_flip,
     inv_dim1_flip,
     inv_dim2_flip,
+    inv_indiv_1dim,
     inv_mat2_cwrotate,
     inv_partition_bool_trim,
     inv_partition_composite,
@@ -28,6 +29,7 @@ def test_every_builtin_operation_has_registered_inverse():
 def test_inverse_registry_distinguishes_reconstructive_and_null_relations():
     assert INV_OP_REGISTRY["inv_partition_shape"].reconstructive
     assert INV_OP_REGISTRY["inv_partition_composite"].reconstructive
+    assert INV_OP_REGISTRY["inv_indiv_1dim"].reconstructive
     assert INV_OP_REGISTRY["inv_bool_complement"].reconstructive
     assert INV_OP_REGISTRY["inv_mat2_cwrotate"].reconstructive
 
@@ -96,7 +98,8 @@ def test_inv_partition_shape_validates_reconstructed_composite():
     )
 
     result = inv_partition_shape(
-        np.array([2, 3], dtype=np.int64),
+        np.int64(2),
+        np.int64(3),
         composite,
     )
 
@@ -104,8 +107,28 @@ def test_inv_partition_shape_validates_reconstructed_composite():
 
     with pytest.raises(ValueError, match="does not match"):
         inv_partition_shape(
-            np.array([3, 2], dtype=np.int64),
+            np.int64(3),
+            np.int64(2),
             composite,
+        )
+
+
+def test_inv_indiv_1dim_reassembles_scalar_elements():
+    result = inv_indiv_1dim(
+        np.int64(7),
+        np.int64(3),
+        np.int64(9),
+    )
+
+    assert result.dtype == np.int64
+    assert np.array_equal(
+        result,
+        np.array([7, 3, 9], dtype=np.int64),
+    )
+
+    with pytest.raises(ValueError, match="scalar"):
+        inv_indiv_1dim(
+            np.array([1, 2], dtype=np.int64),
         )
 
 

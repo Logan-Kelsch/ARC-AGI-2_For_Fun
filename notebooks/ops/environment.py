@@ -493,22 +493,58 @@ class SolutionTree:
     def initialize_output_partition(
         self,
         *,
-        shape_gidx: int,
+        shape_gidxs: Iterable[int],
         composite_gidxs: Iterable[int],
     ) -> None:
         """Create the initial root = shape AND composite proof structure."""
+        shape_gidxs = tuple(int(gidx) for gidx in shape_gidxs)
         composite_gidxs = tuple(int(gidx) for gidx in composite_gidxs)
 
         if 0 not in self.nodes:
             raise KeyError("ST root SP gene 0 is missing.")
-        if shape_gidx not in self.nodes:
-            raise KeyError(f"Missing shape SP gene {shape_gidx}.")
+
+        if len(shape_gidxs) != 2:
+            raise ValueError(
+                "Initial 2D shape partition requires exactly h and w genes."
+            )
+
+        for gidx in shape_gidxs:
+            if gidx not in self.nodes:
+                raise KeyError(f"Missing shape SP gene {gidx}.")
 
         for gidx in composite_gidxs:
             if gidx not in self.nodes:
                 raise KeyError(f"Missing composite SP gene {gidx}.")
 
+        h_gidx, w_gidx = shape_gidxs
+        shape_id: STNodeId = "shape"
         composite_id: STNodeId = "composite"
+
+        shape_branch = STSet(
+            mode="AND",
+            members=[
+                STNodeRef(h_gidx),
+                STNodeRef(w_gidx),
+            ],
+            label="h AND w",
+            partition="and",
+        )
+
+        self.nodes[shape_id] = STNode(
+            node_id=shape_id,
+            label="shape",
+            sp_gidx=None,
+            op="logical_shape",
+            dims=1,
+            derivation=STSet(
+                mode="OR",
+                members=[shape_branch],
+                label="shape alternatives",
+            ),
+        )
+
+        self.nodes[h_gidx].label = "h"
+        self.nodes[w_gidx].label = "w"
 
         composite_branch = STSet(
             mode="AND",
@@ -540,7 +576,7 @@ class SolutionTree:
             mode="AND",
             members=[
                 STInverseRef("inv_partition_shape"),
-                STNodeRef(shape_gidx),
+                STNodeRef(shape_id),
                 STNodeRef(composite_id),
             ],
             label="shape AND composite",
@@ -553,7 +589,6 @@ class SolutionTree:
             label="root alternatives",
         )
 
-        self.nodes[shape_gidx].label = "shape"
 
     def register_generation(
         self,
@@ -748,8 +783,8 @@ def init_env(
       SP gene 0 = output matrix
 
     Then both sides receive the default AND-partition operations:
-      gene 1 = partition_shape(gene 0)
-      genes 2.. = partition_composite(gene 0)
+      genes 1-2 = partition_shape(gene 0): h, w
+      genes 3.. = partition_composite(gene 0)
 
     partition_composite creates two genes per distinct color observed across
     the complete sample set: one scalar int64 color ID and one 2D boolean
@@ -801,12 +836,12 @@ def init_env(
     # Composite itself is reconstructed from every per-color ID/presence gene.
     ST = SolutionTree.from_sp_meta(SP_meta)
 
-    shape_gidx = partition_shape(SP_meta, SP_X, 0)
+    shape_gidxs = partition_shape(SP_meta, SP_X, 0)
     composite_gidxs = partition_composite(SP_meta, SP_X, 0)
 
     ST.sync(SP_meta)
     ST.initialize_output_partition(
-        shape_gidx=shape_gidx,
+        shape_gidxs=shape_gidxs,
         composite_gidxs=composite_gidxs,
     )
 
