@@ -32,6 +32,7 @@ from notebooks.ops.ops import (
     generation_exists,
     gene_atomic_dtypes,
     genes_exactly_equal,
+    indiv_1dim,
     mat2_cwrotate,
     operation,
     operation_output_count,
@@ -95,8 +96,8 @@ def test_init_env_returns_five_components():
 def test_program_x_is_gene_major_then_sample_major():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
-    assert GP_X.shape == (8, 2)
-    assert SP_X.shape == (8, 2)
+    assert GP_X.shape == (9, 2)
+    assert SP_X.shape == (9, 2)
 
     assert np.array_equal(
         GP_X[0, 0],
@@ -123,19 +124,6 @@ def test_initial_metadata_is_parallel_to_gene_indices():
     assert GP_meta.op == [
         "raw_input",
         "partition_shape",
-        "partition_composite",
-        "partition_composite",
-        "partition_composite",
-        "partition_composite",
-        "partition_composite",
-        "partition_composite",
-    ]
-    assert GP_meta.source == [-1, 0, 0, 0, 0, 0, 0, 0]
-    assert GP_meta.dims == [2, 1, 0, 2, 0, 2, 0, 2]
-    assert GP_meta.params == [{}, {}, {}, {}, {}, {}, {}, {}]
-
-    assert SP_meta.op == [
-        "raw_output",
         "partition_shape",
         "partition_composite",
         "partition_composite",
@@ -144,35 +132,57 @@ def test_initial_metadata_is_parallel_to_gene_indices():
         "partition_composite",
         "partition_composite",
     ]
-    assert SP_meta.source == [-1, 0, 0, 0, 0, 0, 0, 0]
-    assert SP_meta.dims == [2, 1, 0, 2, 0, 2, 0, 2]
-    assert SP_meta.params == [{}, {}, {}, {}, {}, {}, {}, {}]
+    assert GP_meta.source == [-1, 0, 0, 0, 0, 0, 0, 0, 0]
+    assert GP_meta.dims == [2, 0, 0, 0, 2, 0, 2, 0, 2]
+    assert GP_meta.params == [{}, {}, {}, {}, {}, {}, {}, {}, {}]
 
-    assert len(GP_meta) == len(GP_X) == 8
-    assert len(SP_meta) == len(SP_X) == 8
+    assert SP_meta.op == [
+        "raw_output",
+        "partition_shape",
+        "partition_shape",
+        "partition_composite",
+        "partition_composite",
+        "partition_composite",
+        "partition_composite",
+        "partition_composite",
+        "partition_composite",
+    ]
+    assert SP_meta.source == [-1, 0, 0, 0, 0, 0, 0, 0, 0]
+    assert SP_meta.dims == [2, 0, 0, 0, 2, 0, 2, 0, 2]
+    assert SP_meta.params == [{}, {}, {}, {}, {}, {}, {}, {}, {}]
+
+    assert len(GP_meta) == len(GP_X) == 9
+    assert len(SP_meta) == len(SP_X) == 9
 
 
-def test_partition_shape_generates_shape_gene():
+def test_partition_shape_generates_h_and_w_scalar_genes():
     meta = ProgramMeta(side="GP")
     X = ProgramX(side="GP", sample_count=2)
 
     X.append_gene(
         [
-            np.zeros((2, 3), dtype=int),
-            np.zeros((5, 4), dtype=int),
+            np.zeros((2, 3), dtype=np.int64),
+            np.zeros((5, 4), dtype=np.int64),
         ]
     )
     meta.append(source=-1, op="raw_input", dims=2)
 
-    gidx = partition_shape(meta, X, 0)
+    h_gidx, w_gidx = partition_shape(meta, X, 0)
 
-    assert gidx == 1
-    assert np.array_equal(X[1, 0], np.array([2, 3]))
-    assert np.array_equal(X[1, 1], np.array([5, 4]))
+    assert (h_gidx, w_gidx) == (1, 2)
 
-    assert meta.source[1] == 0
-    assert meta.op[1] == "partition_shape"
-    assert meta.dims[1] == 1
+    assert X[h_gidx, 0] == np.int64(2)
+    assert X[h_gidx, 1] == np.int64(5)
+    assert X[w_gidx, 0] == np.int64(3)
+    assert X[w_gidx, 1] == np.int64(4)
+
+    assert meta.source == [-1, 0, 0]
+    assert meta.op == [
+        "raw_input",
+        "partition_shape",
+        "partition_shape",
+    ]
+    assert meta.dims == [2, 0, 0]
 
 
 def test_partition_composite_generates_one_id_mask_pair_per_color():
@@ -522,8 +532,9 @@ def test_program_meta_rows_and_program_x_object_matrix_are_easy_to_inspect():
         "dims": 2,
         "params": {},
     }
-    assert matrix.shape == (8, 2)
-    assert np.array_equal(matrix[1, 0], np.array([2, 3]))
+    assert matrix.shape == (9, 2)
+    assert matrix[1, 0] == np.int64(2)
+    assert matrix[2, 0] == np.int64(3)
 
 
 
@@ -539,7 +550,7 @@ def _raw_program(side, values, *, raw_op):
     return meta, X
 
 
-def test_valid_generation_partition_shape_requires_dims_gt_zero():
+def test_valid_generation_partition_shape_requires_exactly_2d():
     meta, X = _raw_program(
         "GP",
         [np.array([[1, 2], [3, 4]], dtype=np.int64)],
@@ -548,23 +559,36 @@ def test_valid_generation_partition_shape_requires_dims_gt_zero():
 
     assert valid_generation(meta, X, partition_shape, 0)
 
-    shape_gidx = partition_shape(meta, X, 0)
+    h_gidx, w_gidx = partition_shape(meta, X, 0)
 
     assert not valid_generation(meta, X, partition_shape, 0)
     assert generation_exists(meta, partition_shape, 0)
 
-    # Shape is 1D, so partition_shape can still be applied to the new gene.
-    assert meta.dims[shape_gidx] == 1
-    assert valid_generation(meta, X, partition_shape, shape_gidx)
+    assert meta.dims[h_gidx] == 0
+    assert meta.dims[w_gidx] == 0
 
-    scalar_gidx = X.append_gene([5])
-    meta.append(source=0, op="manual_scalar", dims=0)
-
+    vector_meta, vector_X = _raw_program(
+        "GP",
+        [np.array([1, 2], dtype=np.int64)],
+        raw_op="raw_input",
+    )
     assert not valid_generation(
-        meta,
-        X,
+        vector_meta,
+        vector_X,
         partition_shape,
-        scalar_gidx,
+        0,
+    )
+
+    cube_meta, cube_X = _raw_program(
+        "GP",
+        [np.zeros((2, 2, 2), dtype=np.int64)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        cube_meta,
+        cube_X,
+        partition_shape,
+        0,
     )
 
 
@@ -713,7 +737,7 @@ def test_gp_generate_zero_is_noop():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     assert GP_generate(GP_meta, GP_X, 0, rng=0) == []
-    assert len(GP_X) == 8
+    assert len(GP_X) == 9
 
 
 def test_sp_generate_runs_one_reversible_step_and_updates_st():
