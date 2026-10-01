@@ -591,11 +591,19 @@ def _eligible_operation_infos(
     *,
     side: str,
     max_output_count: int | None = None,
+    operation_names: Iterable[str] | None = None,
 ) -> list[OperationInfo]:
+    allowed_names = (
+        None
+        if operation_names is None
+        else {str(name) for name in operation_names}
+    )
+
     infos = [
         info
         for info in OP_REGISTRY.values()
         if info.func is not None
+        and (allowed_names is None or info.name in allowed_names)
         and (side != "SP" or info.full_partition)
         and (
             max_output_count is None
@@ -612,11 +620,13 @@ def _random_valid_candidate(
     rng: np.random.Generator,
     max_output_count: int | None = None,
     max_attempts: int = 500,
+    operation_names: Iterable[str] | None = None,
 ) -> tuple[OperationInfo, int, dict[str, Any]] | None:
     """Randomly search the registry/source space for one valid candidate."""
     infos = _eligible_operation_infos(
         side=meta.side,
         max_output_count=max_output_count,
+        operation_names=operation_names,
     )
 
     if not infos or len(X) == 0:
@@ -690,6 +700,7 @@ def GP_generate(
     *,
     rng: np.random.Generator | int | None = None,
     max_attempts_per_generation: int = 500,
+    operation_names: Iterable[str] | None = None,
 ) -> list[int]:
     """Randomly append up to exactly n_new_genes to GP.
 
@@ -724,6 +735,7 @@ def GP_generate(
             rng=rng,
             max_output_count=remaining,
             max_attempts=max_attempts_per_generation,
+            operation_names=operation_names,
         )
 
         if candidate is None:
@@ -756,6 +768,7 @@ def SP_generate(
     *,
     rng: np.random.Generator | int | None = None,
     max_attempts: int = 500,
+    operation_names: Iterable[str] | None = None,
 ) -> list[int]:
     """Apply one random valid full-partition generation step to SP.
 
@@ -778,6 +791,7 @@ def SP_generate(
         SP_X,
         rng=rng,
         max_attempts=max_attempts,
+        operation_names=operation_names,
     )
 
     if candidate is None:
