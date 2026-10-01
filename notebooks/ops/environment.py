@@ -413,8 +413,11 @@ def init_env(
 
     Then both sides receive the default full-partition operations:
       gene 1 = partition_shape(gene 0)
-      gene 2 = partition_composite colors(gene 0)
-      gene 3 = partition_composite presence(gene 0)
+      genes 2.. = partition_composite(gene 0)
+
+    partition_composite creates two genes per distinct color observed across
+    the complete sample set: one scalar int64 color ID and one 2D boolean
+    presence mask.
 
     SP operation enforcement occurs inside notebooks.ops.ops: only operations
     registered as full_partition are legal on the SP side.
