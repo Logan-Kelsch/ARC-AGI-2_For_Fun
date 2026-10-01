@@ -273,6 +273,94 @@ def gene_atomic_dtypes(X: ProgramX, gidx: int) -> tuple[np.dtype, ...]:
     return tuple(sorted(dtypes, key=str))
 
 
+def values_exactly_equal(a: Any, b: Any) -> bool:
+    """Exact structural equality including array shape, dtype, and contents."""
+    if isinstance(a, np.generic):
+        a = np.asarray(a)
+    if isinstance(b, np.generic):
+        b = np.asarray(b)
+
+    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+        if not isinstance(a, np.ndarray) or not isinstance(b, np.ndarray):
+            return False
+        if a.shape != b.shape or a.dtype != b.dtype:
+            return False
+
+        if a.dtype == object:
+            return all(
+                values_exactly_equal(x, y)
+                for x, y in zip(a.flat, b.flat)
+            )
+
+        return bool(np.array_equal(a, b, equal_nan=True))
+
+    if isinstance(a, dict) or isinstance(b, dict):
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        if set(a) != set(b):
+            return False
+        return all(
+            values_exactly_equal(a[key], b[key])
+            for key in a
+        )
+
+    if isinstance(a, (list, tuple)) or isinstance(b, (list, tuple)):
+        if type(a) is not type(b):
+            return False
+        if len(a) != len(b):
+            return False
+        return all(
+            values_exactly_equal(x, y)
+            for x, y in zip(a, b)
+        )
+
+    if type(a) is not type(b):
+        return False
+
+    try:
+        result = a == b
+    except Exception:
+        return False
+
+    if isinstance(result, np.ndarray):
+        return bool(np.all(result))
+    return bool(result)
+
+
+def genes_exactly_equal(
+    gene_a: np.ndarray,
+    gene_b: np.ndarray,
+) -> bool:
+    """Exact equality for two complete genes across every sample."""
+    if not isinstance(gene_a, np.ndarray) or not isinstance(gene_b, np.ndarray):
+        return False
+    if gene_a.ndim != 1 or gene_b.ndim != 1:
+        return False
+    if len(gene_a) != len(gene_b):
+        return False
+
+    return all(
+        values_exactly_equal(a, b)
+        for a, b in zip(gene_a, gene_b)
+    )
+
+
+def equivalent_gene_idx(
+    X: ProgramX,
+    gene_values: np.ndarray,
+    *,
+    stop_before: int | None = None,
+) -> int:
+    """Return an exactly equivalent existing gene index, or -1."""
+    end = len(X) if stop_before is None else int(stop_before)
+
+    for gidx in range(end):
+        if genes_exactly_equal(X[gidx], gene_values):
+            return gidx
+
+    return -1
+
+
 def _resolve_operation(
     op: str | OperationInfo | Callable,
 ) -> OperationInfo:
@@ -619,29 +707,102 @@ def _eligible_operation_infos(
     return infos
 
 
-def _random_valid_candidate(
+def _candidate_signature(
+    info: OperationInfo,
+    source_idx: int,
+    params: dict[str, Any] | None,
+):
+    return _transition_signature(info.name, source_idx, params)
+
+
+def _parameterless_valid_candidates(
     meta: ProgramMeta,
     X: ProgramX,
     *,
-    rng: np.random.Generator,
     max_output_count: int | None = None,
-    max_attempts: int = 500,
     operation_names: Iterable[str] | None = None,
-) -> tuple[OperationInfo, int, dict[str, Any]] | None:
-    """Randomly search the registry/source space for one valid candidate."""
+    excluded_signatures: set[Any] | None = None,
+) -> list[tuple[OperationInfo, int, dict[str, Any]]]:
+    """Enumerate the complete finite candidate space for parameterless ops."""
+    excluded_signatures = excluded_signatures or set()
     infos = _eligible_operation_infos(
         side=meta.side,
         max_output_count=max_output_count,
         operation_names=operation_names,
     )
 
-    if not infos or len(X) == 0:
+    candidates = []
+
+    for info in infos:
+        if info.parameter_sampler is not None:
+            continue
+
+        for source_idx in range(len(X)):
+            params: dict[str, Any] = {}
+            signature = _candidate_signature(info, source_idx, params)
+
+            if signature in excluded_signatures:
+                continue
+
+            if valid_generation(
+                meta,
+                X,
+                info,
+                source_idx,
+                params=params,
+            ):
+                candidates.append((info, source_idx, params))
+
+    return candidates
+
+
+def _has_parameterized_ops(
+    *,
+    side: str,
+    max_output_count: int | None,
+    operation_names: Iterable[str] | None,
+) -> bool:
+    return any(
+        info.parameter_sampler is not None
+        for info in _eligible_operation_infos(
+            side=side,
+            max_output_count=max_output_count,
+            operation_names=operation_names,
+        )
+    )
+
+
+def _random_parameterized_candidate(
+    meta: ProgramMeta,
+    X: ProgramX,
+    *,
+    rng: np.random.Generator,
+    max_output_count: int | None,
+    max_attempts: int,
+    operation_names: Iterable[str] | None,
+    excluded_signatures: set[Any],
+) -> tuple[OperationInfo, int, dict[str, Any]] | None:
+    infos = [
+        info
+        for info in _eligible_operation_infos(
+            side=meta.side,
+            max_output_count=max_output_count,
+            operation_names=operation_names,
+        )
+        if info.parameter_sampler is not None
+    ]
+
+    if not infos:
         return None
 
     for _ in range(max_attempts):
         info = infos[int(rng.integers(len(infos)))]
         source_idx = int(rng.integers(len(X)))
         params = sample_operation_params(info, rng)
+        signature = _candidate_signature(info, source_idx, params)
+
+        if signature in excluded_signatures:
+            continue
 
         if valid_generation(
             meta,
@@ -651,29 +812,6 @@ def _random_valid_candidate(
             params=params,
         ):
             return info, source_idx, params
-
-    # Random attempts can miss a sparse legal space. Parameterless operations
-    # get one deterministic fallback scan before reporting no candidate.
-    parameterless_infos = [
-        info
-        for info in infos
-        if info.parameter_sampler is None
-    ]
-
-    rng.shuffle(parameterless_infos)
-    source_order = np.arange(len(X))
-    rng.shuffle(source_order)
-
-    for info in parameterless_infos:
-        for source_idx in source_order:
-            if valid_generation(
-                meta,
-                X,
-                info,
-                int(source_idx),
-                params={},
-            ):
-                return info, int(source_idx), {}
 
     return None
 
@@ -699,6 +837,112 @@ def _flatten_generated_indices(result: Any) -> list[int]:
     )
 
 
+def _rollback_appended_genes(
+    meta: ProgramMeta,
+    X: ProgramX,
+    *,
+    meta_len: int,
+    x_len: int,
+) -> None:
+    """Rollback an append-only operation attempt."""
+    del meta.source[meta_len:]
+    del meta.op[meta_len:]
+    del meta.dims[meta_len:]
+    del meta.params[meta_len:]
+    del X.genes[x_len:]
+
+
+def _generated_outputs_are_novel(
+    X: ProgramX,
+    new_indices: list[int],
+    *,
+    existing_count: int,
+) -> tuple[bool, str | None]:
+    """Require every output gene to be novel versus all retained gene data."""
+    accepted_new: list[int] = []
+
+    for gidx in new_indices:
+        duplicate_idx = equivalent_gene_idx(
+            X,
+            X[gidx],
+            stop_before=existing_count,
+        )
+        if duplicate_idx >= 0:
+            return (
+                False,
+                f"generated gene {gidx} exactly duplicates existing gene "
+                f"{duplicate_idx}",
+            )
+
+        for prior_new_idx in accepted_new:
+            if genes_exactly_equal(X[gidx], X[prior_new_idx]):
+                return (
+                    False,
+                    f"generated genes {prior_new_idx} and {gidx} are exactly "
+                    "equivalent",
+                )
+
+        accepted_new.append(gidx)
+
+    return True, None
+
+
+def _try_candidate_transactionally(
+    meta: ProgramMeta,
+    X: ProgramX,
+    info: OperationInfo,
+    source_idx: int,
+    params: dict[str, Any],
+) -> tuple[list[int], str | None]:
+    """Apply one candidate and keep it only when all outputs are novel."""
+    meta_before = len(meta)
+    x_before = len(X)
+
+    result = info.func(
+        meta,
+        X,
+        source_idx,
+        **params,
+    )
+    new_indices = _flatten_generated_indices(result)
+
+    if len(new_indices) != info.output_count:
+        _rollback_appended_genes(
+            meta,
+            X,
+            meta_len=meta_before,
+            x_len=x_before,
+        )
+        raise RuntimeError(
+            f"{info.name!r} returned {len(new_indices)} indices but "
+            f"declares output_count={info.output_count}."
+        )
+
+    novel, reason = _generated_outputs_are_novel(
+        X,
+        new_indices,
+        existing_count=x_before,
+    )
+
+    if not novel:
+        _rollback_appended_genes(
+            meta,
+            X,
+            meta_len=meta_before,
+            x_len=x_before,
+        )
+        return [], reason
+
+    return new_indices, None
+
+
+def _generation_exhausted_message(side: str) -> str:
+    return (
+        f"{side} generation terminated: entire legal generation space was "
+        "explored and no additional unique genes can be generated."
+    )
+
+
 def GP_generate(
     GP_meta: ProgramMeta,
     GP_X: ProgramX,
@@ -708,18 +952,14 @@ def GP_generate(
     max_attempts_per_generation: int = 500,
     operation_names: Iterable[str] | None = None,
 ) -> list[int]:
-    """Randomly append up to exactly n_new_genes to GP.
+    """Generate novel GP genes while avoiding transition and data duplicates.
 
-    Each successful step randomly selects:
-      1. a registered operation,
-      2. an existing GP source gene,
-      3. operation parameters (currently empty for the initial ops).
+    For parameterless operations, every currently legal operation/source pair
+    is explored at most once per call. Candidates whose instantiated outputs
+    duplicate any retained gene are rolled back.
 
-    Only candidates accepted by valid_generation are applied.
-
-    Multi-output operations are considered only when their complete output fits
-    within the remaining requested gene budget. If no valid candidate can fill
-    the remaining budget, generation stops early and returns what was added.
+    If all finite legal candidates have been explored without producing another
+    novel gene, generation terminates early with an explicit message.
     """
     _validate_program_pair(GP_meta, GP_X)
 
@@ -731,38 +971,87 @@ def GP_generate(
     n_new_genes = int(n_new_genes)
     rng = _rng(rng)
     generated: list[int] = []
+    rejected_signatures: set[Any] = set()
 
     while len(generated) < n_new_genes:
         remaining = n_new_genes - len(generated)
+        accepted = False
 
-        candidate = _random_valid_candidate(
+        candidates = _parameterless_valid_candidates(
             GP_meta,
             GP_X,
-            rng=rng,
             max_output_count=remaining,
-            max_attempts=max_attempts_per_generation,
+            operation_names=operation_names,
+            excluded_signatures=rejected_signatures,
+        )
+        rng.shuffle(candidates)
+
+        for info, source_idx, params in candidates:
+            signature = _candidate_signature(info, source_idx, params)
+            rejected_signatures.add(signature)
+
+            new_indices, _ = _try_candidate_transactionally(
+                GP_meta,
+                GP_X,
+                info,
+                source_idx,
+                params,
+            )
+
+            if new_indices:
+                generated.extend(new_indices)
+                accepted = True
+                break
+
+        if accepted:
+            continue
+
+        parameterized = _has_parameterized_ops(
+            side="GP",
+            max_output_count=remaining,
             operation_names=operation_names,
         )
 
-        if candidate is None:
-            break
-
-        info, source_idx, params = candidate
-        result = info.func(
-            GP_meta,
-            GP_X,
-            source_idx,
-            **params,
-        )
-        new_indices = _flatten_generated_indices(result)
-
-        if len(new_indices) != info.output_count:
-            raise RuntimeError(
-                f"{info.name!r} returned {len(new_indices)} indices but "
-                f"declares output_count={info.output_count}."
+        if parameterized:
+            candidate = _random_parameterized_candidate(
+                GP_meta,
+                GP_X,
+                rng=rng,
+                max_output_count=remaining,
+                max_attempts=max_attempts_per_generation,
+                operation_names=operation_names,
+                excluded_signatures=rejected_signatures,
             )
 
-        generated.extend(new_indices)
+            if candidate is not None:
+                info, source_idx, params = candidate
+                signature = _candidate_signature(info, source_idx, params)
+                rejected_signatures.add(signature)
+
+                new_indices, _ = _try_candidate_transactionally(
+                    GP_meta,
+                    GP_X,
+                    info,
+                    source_idx,
+                    params,
+                )
+
+                if new_indices:
+                    generated.extend(new_indices)
+                    continue
+
+                # A sampled parameterized candidate produced duplicate data.
+                # Continue to another loop iteration to sample again.
+                continue
+
+            print(
+                "GP generation terminated: no novel gene was found within the "
+                "sampled parameterized generation space."
+            )
+            break
+
+        print(_generation_exhausted_message("GP"))
+        break
 
     return generated
 
@@ -776,14 +1065,12 @@ def SP_generate(
     max_attempts: int = 500,
     operation_names: Iterable[str] | None = None,
 ) -> list[int]:
-    """Apply one random valid full-partition generation step to SP.
+    """Generate one novel SP operation application.
 
-    One generation step may create multiple genes when the chosen registered
-    full-partition operation has output_count > 1.
-
-    If ST is supplied it is synchronized after the SP structure grows.
-    Returns the newly generated SP gene indices, or [] when no legal candidate
-    remains.
+    Legal parameterless SP candidates are exhaustively explored until one
+    produces entirely novel output genes. Duplicate-data candidates are rolled
+    back. If none remain, the function prints that the legal generation space
+    has been exhausted and returns [].
     """
     _validate_program_pair(SP_meta, SP_X)
 
@@ -791,28 +1078,80 @@ def SP_generate(
         raise ValueError("SP_generate requires SP-side meta/X.")
 
     rng = _rng(rng)
+    rejected_signatures: set[Any] = set()
 
-    candidate = _random_valid_candidate(
+    candidates = _parameterless_valid_candidates(
         SP_meta,
         SP_X,
-        rng=rng,
-        max_attempts=max_attempts,
         operation_names=operation_names,
+        excluded_signatures=rejected_signatures,
     )
+    rng.shuffle(candidates)
 
-    if candidate is None:
+    for info, source_idx, params in candidates:
+        signature = _candidate_signature(info, source_idx, params)
+        rejected_signatures.add(signature)
+
+        new_indices, _ = _try_candidate_transactionally(
+            SP_meta,
+            SP_X,
+            info,
+            source_idx,
+            params,
+        )
+
+        if not new_indices:
+            continue
+
+        if ST is not None:
+            ST.sync(SP_meta)
+
+        return new_indices
+
+    if _has_parameterized_ops(
+        side="SP",
+        max_output_count=None,
+        operation_names=operation_names,
+    ):
+        for _ in range(max_attempts):
+            candidate = _random_parameterized_candidate(
+                SP_meta,
+                SP_X,
+                rng=rng,
+                max_output_count=None,
+                max_attempts=1,
+                operation_names=operation_names,
+                excluded_signatures=rejected_signatures,
+            )
+
+            if candidate is None:
+                continue
+
+            info, source_idx, params = candidate
+            signature = _candidate_signature(info, source_idx, params)
+            rejected_signatures.add(signature)
+
+            new_indices, _ = _try_candidate_transactionally(
+                SP_meta,
+                SP_X,
+                info,
+                source_idx,
+                params,
+            )
+
+            if not new_indices:
+                continue
+
+            if ST is not None:
+                ST.sync(SP_meta)
+
+            return new_indices
+
+        print(
+            "SP generation terminated: no novel gene was found within the "
+            "sampled parameterized generation space."
+        )
         return []
 
-    info, source_idx, params = candidate
-    result = info.func(
-        SP_meta,
-        SP_X,
-        source_idx,
-        **params,
-    )
-    new_indices = _flatten_generated_indices(result)
-
-    if ST is not None:
-        ST.sync(SP_meta)
-
-    return new_indices
+    print(_generation_exhausted_message("SP"))
+    return []
