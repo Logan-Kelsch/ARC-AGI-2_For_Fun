@@ -27,6 +27,7 @@ from notebooks.ops.ops import (
     genes_exactly_equal,
     mat2_cwrotate,
     operation,
+    operation_output_count,
     partition_bool_trim,
     partition_composite,
     partition_shape,
@@ -259,6 +260,27 @@ def test_partition_composite_uses_union_of_colors_across_samples():
     assert X[3, 0] == X[3, 1] == np.int64(2)
     assert np.array_equal(X[4, 0], np.array([[False, False]]))
     assert np.array_equal(X[4, 1], np.array([[True, True]]))
+
+
+def test_partition_composite_dynamic_output_count_matches_color_union():
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=2)
+
+    X.append_gene(
+        [
+            np.array([[0, 1]], dtype=np.int64),
+            np.array([[0, 2]], dtype=np.int64),
+        ]
+    )
+    meta.append(source=-1, op="raw_input", dims=2)
+
+    assert OP_REGISTRY["partition_composite"].output_count is None
+    assert operation_output_count(
+        partition_composite,
+        meta,
+        X,
+        0,
+    ) == 6
 
 
 def test_default_partition_ops_are_marked_full_partition():
