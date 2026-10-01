@@ -188,32 +188,45 @@ It generates one gene with dims=1.
 ### partition_composite
 
 ~~~python
-color_gidx, presence_gidx = partition_composite(
+generated_gidx = partition_composite(
     meta,
     X,
     source_idx,
 )
 ~~~
 
-For each categorical 2D source it generates two genes.
+The operation finds the sorted union of colors used across all training samples.
 
-First:
-
-~~~text
-1D sorted array of colors used
-~~~
-
-Second:
+For each color it creates two separate gene-major outputs:
 
 ~~~text
-3D boolean array:
-[num_colors, height, width]
+color_k_id        scalar np.int64
+color_k_presence  2D boolean matrix
 ~~~
 
-Presence channel i corresponds to color_ids[i].
+So a three-color source creates six genes:
 
-This is the same categorical decomposition used by the previous
-grid_dissection work, now expressed as a GP/SP operation.
+~~~text
+color_1_id
+color_1_presence
+color_2_id
+color_2_presence
+color_3_id
+color_3_presence
+~~~
+
+The color-ID gene is constant across samples. If that color is absent from a
+particular sample, its corresponding presence gene contains an all-False matrix
+with that sample's spatial shape.
+
+This keeps the number and meaning of gene indices aligned across all samples
+while exposing each categorical component independently to GP/SP matching.
+
+partition_composite is a dynamic-output operation:
+
+~~~text
+output_count = 2 * number of distinct colors across all samples
+~~~
 
 Both initial operations are full partitions and are therefore legal on SP.
 
@@ -233,25 +246,30 @@ SP_X[0] = output matrices across samples
 Then it applies partition_shape and partition_composite to gene 0 on both
 sides.
 
-The initial gene table is therefore:
+The initial gene table is variable-length because the composite partition now
+creates one pair per distinct color:
 
 ~~~text
 gidx   op                     source   dims
 
 0      raw_input/output       -1       2
 1      partition_shape         0       1
-2      partition_composite     0       1   color IDs
-3      partition_composite     0       3   color presence
+2      partition_composite     0       0   first color ID
+3      partition_composite     0       2   first color presence
+4      partition_composite     0       0   second color ID
+5      partition_composite     0       2   second color presence
+...    ...                      ...     ...
 ~~~
 
-The initial ST is derived from SP_meta:
+For C distinct colors, initialization creates:
 
 ~~~text
-SP g0: raw_output
-├── SP g1: partition_shape
-├── SP g2: partition_composite   dims=1
-└── SP g3: partition_composite   dims=3
+2 + 2*C total genes
 ~~~
+
+on that side.
+
+The initial ST is derived directly from however many SP genes this produces.
 
 and every node begins with:
 
@@ -409,8 +427,9 @@ instantiate operation
 until the requested gene budget is filled or no valid generation remains.
 
 The requested count is a gene-count budget, not an operation-count budget.
-Therefore a two-output operation is only eligible when at least two gene slots
-remain.
+Before selecting a candidate, generation asks the operation how many outputs it
+would produce on that exact source. This supports both fixed-output operations
+and dynamic operations such as partition_composite.
 
 The returned list contains the newly created GP gene indices.
 

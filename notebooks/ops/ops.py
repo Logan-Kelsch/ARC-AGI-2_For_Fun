@@ -19,8 +19,12 @@ from .environment import (
 
 ParameterSampler = Callable[[np.random.Generator], dict[str, Any]]
 GenerationValidator = Callable[
-    [ProgramMeta, ProgramX, int, dict[str, Any]],
+    [ProgramMeta, ProgramX, Any, dict[str, Any]],
     bool,
+]
+OutputCountEstimator = Callable[
+    [ProgramMeta, ProgramX, Any, dict[str, Any]],
+    int,
 ]
 
 
@@ -46,7 +50,8 @@ class OperationInfo:
 
     name: str
     full_partition: bool
-    output_count: int
+    output_count: int | None
+    output_count_estimator: OutputCountEstimator | None = None
     source_count: int = 1
     ordered_sources: bool = True
     min_dims_exclusive: int | None = None
@@ -71,7 +76,8 @@ def _normalize_dtypes(
 def operation(
     *,
     full_partition: bool,
-    output_count: int,
+    output_count: int | None,
+    output_count_estimator: OutputCountEstimator | None = None,
     source_count: int = 1,
     ordered_sources: bool = True,
     min_dims_exclusive: int | None = None,
@@ -89,7 +95,11 @@ def operation(
     The decorator also validates every direct operation application, so manual
     notebook calls and random generation obey the same rules.
     """
-    if output_count < 1:
+    if output_count is None and output_count_estimator is None:
+        raise ValueError(
+            "Dynamic-output operations require output_count_estimator."
+        )
+    if output_count is not None and output_count < 1:
         raise ValueError("output_count must be >= 1.")
     if source_count < 1:
         raise ValueError("source_count must be >= 1.")
@@ -108,7 +118,10 @@ def operation(
         info = OperationInfo(
             name=func.__name__,
             full_partition=bool(full_partition),
-            output_count=int(output_count),
+            output_count=(
+                None if output_count is None else int(output_count)
+            ),
+            output_count_estimator=output_count_estimator,
             source_count=int(source_count),
             ordered_sources=bool(ordered_sources),
             min_dims_exclusive=min_dims_exclusive,
@@ -152,6 +165,14 @@ def operation(
                     f"{meta.side} gene {source_idx}: {reason}"
                 )
 
+            expected_output_count = operation_output_count(
+                info,
+                meta,
+                X,
+                source_idx,
+                params=params,
+            )
+
             meta_before = len(meta)
             x_before = len(X)
 
@@ -160,10 +181,14 @@ def operation(
             meta_added = len(meta) - meta_before
             x_added = len(X) - x_before
 
-            if meta_added != info.output_count or x_added != info.output_count:
+            if (
+                meta_added != expected_output_count
+                or x_added != expected_output_count
+            ):
                 raise RuntimeError(
-                    f"Operation {info.name!r} declared {info.output_count} "
-                    f"outputs but added meta={meta_added}, X={x_added}."
+                    f"Operation {info.name!r} expected "
+                    f"{expected_output_count} outputs but added "
+                    f"meta={meta_added}, X={x_added}."
                 )
 
             if len(meta) != len(X):
@@ -434,6 +459,42 @@ def _resolve_operation(
     raise TypeError(
         "op must be an operation name, OperationInfo, or registered callable."
     )
+
+
+def operation_output_count(
+    op: str | OperationInfo | Callable,
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    *,
+    params: dict[str, Any] | None = None,
+) -> int:
+    """Return the output count for one exact operation application."""
+    info = _resolve_operation(op)
+
+    if info.output_count is not None:
+        return int(info.output_count)
+
+    if info.output_count_estimator is None:
+        raise RuntimeError(
+            f"Operation {info.name!r} has no output-count definition."
+        )
+
+    count = int(
+        info.output_count_estimator(
+            meta,
+            X,
+            _canonical_source(info, source_idx),
+            _copy_params(params),
+        )
+    )
+
+    if count < 1:
+        raise ValueError(
+            f"Operation {info.name!r} estimated invalid output count {count}."
+        )
+
+    return count
 
 
 def generation_exists(
@@ -833,6 +894,34 @@ def _append_gene(
     return gidx
 
 
+def _partition_composite_colors(
+    X: ProgramX,
+    source_idx: int,
+) -> np.ndarray:
+    """Sorted union of categorical colors used across all samples."""
+    colors = [
+        np.asarray(value).reshape(-1)
+        for value in X[source_idx]
+    ]
+
+    if not colors:
+        return np.empty(0, dtype=np.int64)
+
+    return np.unique(
+        np.concatenate(colors)
+    ).astype(np.int64, copy=False)
+
+
+def _partition_composite_output_count(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> int:
+    source = _source_tuple(source_idx)[0]
+    return 2 * len(_partition_composite_colors(X, source))
+
+
 @operation(
     full_partition=True,
     output_count=1,
@@ -862,7 +951,8 @@ def partition_shape(
 
 @operation(
     full_partition=True,
-    output_count=2,
+    output_count=None,
+    output_count_estimator=_partition_composite_output_count,
     min_dims_exclusive=1,
     atomic_dtypes=(np.int64,),
 )
@@ -870,48 +960,53 @@ def partition_composite(
     meta: ProgramMeta,
     X: ProgramX,
     source_idx: int,
-) -> tuple[int, int]:
-    """Partition an integer categorical grid into IDs and presence masks."""
+) -> tuple[int, ...]:
+    """Partition a categorical grid into one ID/mask pair per used color.
+
+    The color set is the sorted union observed across all training samples.
+    For each color, two gene-major outputs are created:
+
+      1. scalar np.int64 color ID, constant across samples;
+      2. 2D boolean presence mask for that color in each sample.
+
+    If a color is absent from one sample, its presence value for that sample is
+    an all-False matrix with the same spatial shape as the source sample.
+    """
     source_idx = _validate_source(meta, X, source_idx)
+    colors = _partition_composite_colors(X, source_idx)
 
-    color_values = []
-    presence_values = []
+    generated: list[int] = []
 
-    for sample_idx, value in enumerate(X[source_idx]):
-        array = np.asarray(value)
+    for color in colors:
+        color = np.int64(color)
 
-        if array.ndim < 2:
-            raise ValueError(
-                "partition_composite requires source dims > 1; "
-                f"sample {sample_idx} has shape {array.shape}."
-            )
+        color_values = [
+            np.int64(color)
+            for _ in range(X.sample_count)
+        ]
+        presence_values = [
+            (np.asarray(value) == color).astype(bool, copy=False)
+            for value in X[source_idx]
+        ]
 
-        colors = np.unique(array)
+        color_gidx = _append_gene(
+            meta,
+            X,
+            color_values,
+            source=source_idx,
+            op_name="partition_composite",
+        )
+        presence_gidx = _append_gene(
+            meta,
+            X,
+            presence_values,
+            source=source_idx,
+            op_name="partition_composite",
+        )
 
-        presence = np.stack(
-            [array == color for color in colors],
-            axis=0,
-        ).astype(bool, copy=False)
+        generated.extend([color_gidx, presence_gidx])
 
-        color_values.append(colors.astype(np.int64, copy=False))
-        presence_values.append(presence)
-
-    color_gidx = _append_gene(
-        meta,
-        X,
-        color_values,
-        source=source_idx,
-        op_name="partition_composite",
-    )
-    presence_gidx = _append_gene(
-        meta,
-        X,
-        presence_values,
-        source=source_idx,
-        op_name="partition_composite",
-    )
-
-    return color_gidx, presence_gidx
+    return tuple(generated)
 
 
 
@@ -1255,10 +1350,6 @@ def _eligible_operation_infos(
         if info.func is not None
         and (allowed_names is None or info.name in allowed_names)
         and (side != "SP" or info.full_partition)
-        and (
-            max_output_count is None
-            or info.output_count <= max_output_count
-        )
     ]
     return infos
 
@@ -1300,7 +1391,7 @@ def _parameterless_valid_candidates(
     max_output_count: int | None = None,
     operation_names: Iterable[str] | None = None,
     excluded_signatures: set[Any] | None = None,
-) -> list[tuple[OperationInfo, int, dict[str, Any]]]:
+) -> list[tuple[OperationInfo, Any, dict[str, Any]]]:
     """Enumerate the complete finite candidate space for parameterless ops."""
     excluded_signatures = excluded_signatures or set()
     infos = _eligible_operation_infos(
@@ -1320,6 +1411,18 @@ def _parameterless_valid_candidates(
             signature = _candidate_signature(info, source_idx, params)
 
             if signature in excluded_signatures:
+                continue
+
+            if (
+                max_output_count is not None
+                and operation_output_count(
+                    info,
+                    meta,
+                    X,
+                    source_idx,
+                    params=params,
+                ) > max_output_count
+            ):
                 continue
 
             if valid_generation(
@@ -1359,7 +1462,7 @@ def _random_parameterized_candidate(
     max_attempts: int,
     operation_names: Iterable[str] | None,
     excluded_signatures: set[Any],
-) -> tuple[OperationInfo, int, dict[str, Any]] | None:
+) -> tuple[OperationInfo, Any, dict[str, Any]] | None:
     infos = [
         info
         for info in _eligible_operation_infos(
@@ -1383,6 +1486,18 @@ def _random_parameterized_candidate(
         signature = _candidate_signature(info, source_idx, params)
 
         if signature in excluded_signatures:
+            continue
+
+        if (
+            max_output_count is not None
+            and operation_output_count(
+                info,
+                meta,
+                X,
+                source_idx,
+                params=params,
+            ) > max_output_count
+        ):
             continue
 
         if valid_generation(
@@ -1476,6 +1591,14 @@ def _try_candidate_transactionally(
     params: dict[str, Any],
 ) -> tuple[list[int], str | None]:
     """Apply one candidate and keep it only when all outputs are novel."""
+    expected_output_count = operation_output_count(
+        info,
+        meta,
+        X,
+        source_idx,
+        params=params,
+    )
+
     meta_before = len(meta)
     x_before = len(X)
 
@@ -1487,7 +1610,7 @@ def _try_candidate_transactionally(
     )
     new_indices = _flatten_generated_indices(result)
 
-    if len(new_indices) != info.output_count:
+    if len(new_indices) != expected_output_count:
         _rollback_appended_genes(
             meta,
             X,
@@ -1496,7 +1619,7 @@ def _try_candidate_transactionally(
         )
         raise RuntimeError(
             f"{info.name!r} returned {len(new_indices)} indices but "
-            f"declares output_count={info.output_count}."
+            f"expected {expected_output_count}."
         )
 
     novel, reason = _generated_outputs_are_novel(
