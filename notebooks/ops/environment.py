@@ -747,7 +747,7 @@ def init_env(
       GP gene 0 = input matrix
       SP gene 0 = output matrix
 
-    Then both sides receive the default full-partition operations:
+    Then both sides receive the default AND-partition operations:
       gene 1 = partition_shape(gene 0)
       genes 2.. = partition_composite(gene 0)
 
@@ -755,8 +755,11 @@ def init_env(
     the complete sample set: one scalar int64 color ID and one 2D boolean
     presence mask.
 
-    SP operation enforcement occurs inside notebooks.ops.ops: only operations
-    registered as full_partition are legal on the SP side.
+    ST begins as a boolean proof:
+        root = shape AND composite
+
+    Later SP transformations may add reversible OR/AND alternatives. NULL
+    partition operations are GP-only.
     """
     grid_set = list(grid_set)
 
@@ -790,9 +793,21 @@ def init_env(
     partition_shape(GP_meta, GP_X, 0)
     partition_composite(GP_meta, GP_X, 0)
 
-    partition_shape(SP_meta, SP_X, 0)
-    partition_composite(SP_meta, SP_X, 0)
-
+    # Build ST from the raw output first, then add the initial solution
+    # decomposition explicitly as:
+    #
+    #     root <- shape AND composite
+    #
+    # Composite itself is reconstructed from every per-color ID/presence gene.
     ST = SolutionTree.from_sp_meta(SP_meta)
+
+    shape_gidx = partition_shape(SP_meta, SP_X, 0)
+    composite_gidxs = partition_composite(SP_meta, SP_X, 0)
+
+    ST.sync(SP_meta)
+    ST.initialize_output_partition(
+        shape_gidx=shape_gidx,
+        composite_gidxs=composite_gidxs,
+    )
 
     return GP_meta, GP_X, SP_meta, SP_X, ST
