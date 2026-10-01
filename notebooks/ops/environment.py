@@ -636,6 +636,63 @@ class SolutionTree:
 
         self._append_alternative(source_gidx, branch)
 
+    def unresolved_frontier_nodes(
+        self,
+        node_id: STNodeId | None = None,
+    ) -> tuple[STNodeId, ...]:
+        """Return unresolved concrete SP nodes reachable from the solution root.
+
+        Unlike unresolved_leaf_nodes(), this keeps an unresolved concrete parent
+        in the frontier even when it also has derived alternatives. That matters
+        for OR semantics: a source may still be solved directly by GP while its
+        transformed children offer alternate solution paths.
+
+        Solved nodes prune their entire subtree because no further proof below
+        them is required.
+        """
+        if node_id is None:
+            if not self.roots:
+                return ()
+            node_id = self.roots[0]
+
+        result: list[STNodeId] = []
+        seen: set[STNodeId] = set()
+
+        def collect_requirement(requirement: Any) -> None:
+            if isinstance(requirement, STInverseRef):
+                return
+
+            if isinstance(requirement, STSet):
+                for member in requirement.members:
+                    collect_requirement(member)
+                return
+
+            if isinstance(requirement, STNodeRef):
+                collect_node(requirement.node_id)
+                return
+
+            raise TypeError("Unknown ST requirement type.")
+
+        def collect_node(current_id: STNodeId) -> None:
+            if current_id in seen:
+                return
+
+            seen.add(current_id)
+            node = self.nodes[current_id]
+
+            if self.is_solved(current_id):
+                return
+
+            if node.sp_gidx is not None:
+                result.append(current_id)
+
+            if node.derivation is not None:
+                collect_requirement(node.derivation)
+
+        collect_node(node_id)
+
+        return tuple(result)
+
     def unresolved_leaf_nodes(
         self,
         node_id: STNodeId | None = None,
@@ -726,6 +783,94 @@ class SolutionTree:
             )
 
         return rows
+
+
+def get_ST_unsovled_frontier(
+    ST: SolutionTree,
+    SP_X: ProgramX,
+    *,
+    min_dim: int | None = None,
+    max_dim: int | None = None,
+) -> np.ndarray:
+    """Return instantiated SP data for unresolved Boolean-ST frontier nodes.
+
+    The result is a 1D object ndarray with one entry per unresolved concrete ST
+    node reachable from the root. Each entry is that SP gene's complete
+    instantiated data across samples, i.e. the same 1D object array stored at:
+
+        SP_X[sp_gidx]
+
+    min_dim and max_dim are inclusive filters on the node's recorded gene
+    dimensionality. Examples:
+
+        min_dim=0, max_dim=0  -> scalar/int/float/bool frontier genes only
+        min_dim=2, max_dim=2  -> matrix frontier genes only
+        min_dim=1             -> 1D and higher
+        max_dim=1             -> scalar and 1D
+
+    Logical helper nodes such as "shape" and "composite" have no SP gene and
+    are therefore never returned.
+    """
+    if SP_X.side != "SP":
+        raise ValueError("get_ST_unsovled_frontier requires SP_X.side == 'SP'.")
+
+    def normalize_dim_bound(name: str, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(f"{name} must be a non-negative integer or None.")
+        value = int(value)
+        if value < 0:
+            raise ValueError(f"{name} must be >= 0.")
+        return value
+
+    min_dim = normalize_dim_bound("min_dim", min_dim)
+    max_dim = normalize_dim_bound("max_dim", max_dim)
+
+    if (
+        min_dim is not None
+        and max_dim is not None
+        and min_dim > max_dim
+    ):
+        raise ValueError("min_dim may not be greater than max_dim.")
+
+    frontier = ST.unresolved_frontier_nodes()
+    selected: list[np.ndarray] = []
+
+    for node_id in frontier:
+        node = ST[node_id]
+
+        if node.sp_gidx is None:
+            continue
+
+        if node.sp_gidx < 0 or node.sp_gidx >= len(SP_X):
+            raise IndexError(
+                f"ST node {node_id!r} references SP gene {node.sp_gidx}, "
+                f"outside range [0, {len(SP_X) - 1}]."
+            )
+
+        dims = node.dims
+
+        if dims is None:
+            continue
+        if min_dim is not None and dims < min_dim:
+            continue
+        if max_dim is not None and dims > max_dim:
+            continue
+
+        selected.append(_copy_value(SP_X[node.sp_gidx]))
+
+    result = np.empty(len(selected), dtype=object)
+
+    for index, gene in enumerate(selected):
+        result[index] = gene
+
+    return result
+
+
+# Correctly spelled alias for convenience; the requested public name above is
+# retained exactly.
+get_ST_unsolved_frontier = get_ST_unsovled_frontier
 
 
 def _extract_pair_grid(sample: Any, field_name: str) -> np.ndarray:

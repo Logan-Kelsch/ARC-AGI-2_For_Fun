@@ -6,6 +6,8 @@ from .environment import (
     STNodeRef,
     STSet,
     SolutionTree,
+    get_ST_unsolved_frontier,
+    get_ST_unsovled_frontier,
     init_env,
     source_indices,
 )
@@ -95,6 +97,8 @@ __all__ = [
     "STSet",
     "STNode",
     "SolutionTree",
+    "get_ST_unsovled_frontier",
+    "get_ST_unsolved_frontier",
     "init_env",
     "source_indices",
     "OP_REGISTRY",

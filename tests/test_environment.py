@@ -10,6 +10,8 @@ from notebooks.ops.environment import (
     STNodeRef,
     STSet,
     SolutionTree,
+    get_ST_unsolved_frontier,
+    get_ST_unsovled_frontier,
     init_env,
 )
 from notebooks.ops.inv_ops import (
@@ -648,6 +650,188 @@ def test_user_example_shape_and_rotated_composite_path_solves_root():
     assert ST.is_solved("composite")
     assert ST.is_solved(0)
     assert ST.solved
+
+
+def test_get_ST_unsovled_frontier_returns_unresolved_concrete_sp_data():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    frontier = get_ST_unsovled_frontier(ST, SP_X)
+
+    assert frontier.shape == (9,)
+    assert frontier.dtype == object
+
+    # Traversal order follows the unresolved concrete proof graph:
+    # raw output, h, w, then the per-color ID/mask genes.
+    for result_idx, sp_gidx in enumerate(range(9)):
+        assert genes_exactly_equal(
+            frontier[result_idx],
+            SP_X[sp_gidx],
+        )
+
+
+def test_get_ST_unsovled_frontier_filters_scalar_nodes_by_dim():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+
+    # h, w, and three scalar color-ID genes.
+    expected_gidx = (1, 2, 3, 5, 7)
+
+    assert frontier.shape == (5,)
+
+    for result_idx, sp_gidx in enumerate(expected_gidx):
+        assert genes_exactly_equal(
+            frontier[result_idx],
+            SP_X[sp_gidx],
+        )
+
+
+def test_get_ST_unsovled_frontier_filters_matrix_nodes_by_dim():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+    )
+
+    # Raw output plus the three color-presence masks.
+    expected_gidx = (0, 4, 6, 8)
+
+    assert frontier.shape == (4,)
+
+    for result_idx, sp_gidx in enumerate(expected_gidx):
+        assert genes_exactly_equal(
+            frontier[result_idx],
+            SP_X[sp_gidx],
+        )
+
+
+def test_get_ST_unsovled_frontier_prunes_solved_nodes_and_subtrees():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    ST.mark_solution(1, 100)
+
+    scalar_frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+
+    # h is solved, so only w and the three color IDs remain.
+    assert scalar_frontier.shape == (4,)
+
+    ST.mark_solution(0, 999)
+
+    # Solving the root directly means no remaining frontier is required.
+    frontier = get_ST_unsovled_frontier(ST, SP_X)
+
+    assert frontier.shape == (0,)
+    assert frontier.dtype == object
+
+
+def test_get_ST_unsovled_frontier_keeps_direct_and_derived_or_candidates():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    source_gidx = 4
+    transformed_gidx = mat2_cwrotate(
+        SP_meta,
+        SP_X,
+        source_gidx,
+    )
+    ST.register_generation(
+        SP_meta,
+        source_gidx=source_gidx,
+        generated_gidxs=(transformed_gidx,),
+        partition="or",
+        inverse_op="inv_mat2_cwrotate",
+        op_name="mat2_cwrotate",
+    )
+
+    matrix_frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+    )
+
+    # The original source is still directly solvable, while the rotated gene is
+    # an alternate OR path, so both remain in the frontier.
+    assert any(
+        genes_exactly_equal(gene, SP_X[source_gidx])
+        for gene in matrix_frontier
+    )
+    assert any(
+        genes_exactly_equal(gene, SP_X[transformed_gidx])
+        for gene in matrix_frontier
+    )
+
+    ST.mark_solution(source_gidx, 200)
+
+    matrix_frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+    )
+
+    # Directly solving the source prunes its alternate transformed subtree.
+    assert not any(
+        genes_exactly_equal(gene, SP_X[source_gidx])
+        for gene in matrix_frontier
+    )
+    assert not any(
+        genes_exactly_equal(gene, SP_X[transformed_gidx])
+        for gene in matrix_frontier
+    )
+
+
+def test_get_ST_unsovled_frontier_validates_dim_bounds_and_side():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    with pytest.raises(ValueError, match="min_dim"):
+        get_ST_unsovled_frontier(
+            ST,
+            SP_X,
+            min_dim=2,
+            max_dim=1,
+        )
+
+    with pytest.raises(ValueError, match=">= 0"):
+        get_ST_unsovled_frontier(
+            ST,
+            SP_X,
+            min_dim=-1,
+        )
+
+    with pytest.raises(TypeError, match="non-negative integer"):
+        get_ST_unsovled_frontier(
+            ST,
+            SP_X,
+            max_dim=1.5,
+        )
+
+    with pytest.raises(ValueError, match="SP_X.side"):
+        get_ST_unsovled_frontier(ST, GP_X)
+
+
+def test_correctly_spelled_ST_frontier_alias_matches_requested_name():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    requested_name = get_ST_unsovled_frontier(ST, SP_X)
+    corrected_alias = get_ST_unsolved_frontier(ST, SP_X)
+
+    assert requested_name.shape == corrected_alias.shape
+
+    for left, right in zip(requested_name, corrected_alias):
+        assert genes_exactly_equal(left, right)
 
 
 def test_program_meta_rows_and_program_x_object_matrix_are_easy_to_inspect():

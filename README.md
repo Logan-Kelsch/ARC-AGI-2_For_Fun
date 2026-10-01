@@ -431,3 +431,25 @@ docs/GP_SP_ENVIRONMENT.md
 ## Current research principle
 
 > **Grow interpretations on the input side, partition the known solution exactly on the output side, and let explicit structural matches progressively constrain the program search.**
+
+
+### Unresolved ST frontier
+
+~~~python
+frontier = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=0,
+    max_dim=2,
+)
+~~~
+
+returns a 1D object array containing the complete instantiated SP genes for
+concrete unresolved nodes still reachable from the root proof.
+
+Use min_dim=max_dim=0 for scalar targets and min_dim=max_dim=2 for matrix
+targets. Solved nodes prune their lower proof subtrees. OR alternatives keep
+both the original concrete target and its transformed target available until
+one path resolves the source.
+
+A correctly spelled alias, get_ST_unsolved_frontier, is also available.
