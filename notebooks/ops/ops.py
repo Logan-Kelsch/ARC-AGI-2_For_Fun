@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import wraps
 import inspect
+import itertools
 from typing import Any, Callable, Iterable
 
 import numpy as np
@@ -46,7 +47,10 @@ class OperationInfo:
     name: str
     full_partition: bool
     output_count: int
+    source_count: int = 1
+    ordered_sources: bool = True
     min_dims_exclusive: int | None = None
+    allowed_dims: tuple[int, ...] | None = None
     atomic_dtypes: tuple[np.dtype, ...] | None = None
     parameter_sampler: ParameterSampler | None = None
     validator: GenerationValidator | None = None
@@ -68,7 +72,10 @@ def operation(
     *,
     full_partition: bool,
     output_count: int,
+    source_count: int = 1,
+    ordered_sources: bool = True,
     min_dims_exclusive: int | None = None,
+    allowed_dims: Iterable[int] | None = None,
     atomic_dtypes: Iterable[Any] | None = None,
     parameter_sampler: ParameterSampler | None = None,
     validator: GenerationValidator | None = None,
@@ -84,13 +91,28 @@ def operation(
     """
     if output_count < 1:
         raise ValueError("output_count must be >= 1.")
+    if source_count < 1:
+        raise ValueError("source_count must be >= 1.")
+
+    normalized_allowed_dims = (
+        None
+        if allowed_dims is None
+        else tuple(sorted({int(dim) for dim in allowed_dims}))
+    )
+    if normalized_allowed_dims is not None and any(
+        dim < 0 for dim in normalized_allowed_dims
+    ):
+        raise ValueError("allowed_dims must contain non-negative dimensions.")
 
     def decorator(func: Callable):
         info = OperationInfo(
             name=func.__name__,
             full_partition=bool(full_partition),
             output_count=int(output_count),
+            source_count=int(source_count),
+            ordered_sources=bool(ordered_sources),
             min_dims_exclusive=min_dims_exclusive,
+            allowed_dims=normalized_allowed_dims,
             atomic_dtypes=_normalize_dtypes(atomic_dtypes),
             parameter_sampler=parameter_sampler,
             validator=validator,
@@ -104,7 +126,7 @@ def operation(
             bound = signature.bind(meta, X, *args, **kwargs)
             bound.apply_defaults()
 
-            source_idx = int(bound.arguments["source_idx"])
+            source_idx = _normalize_source(bound.arguments["source_idx"])
             params = {
                 name: value
                 for name, value in bound.arguments.items()
