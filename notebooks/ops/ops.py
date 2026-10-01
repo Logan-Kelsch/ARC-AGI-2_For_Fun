@@ -550,7 +550,7 @@ def valid_generation(
     meta: ProgramMeta,
     X: ProgramX,
     op: str | OperationInfo | Callable,
-    source_idx: int,
+    source_idx: Any,
     *,
     params: dict[str, Any] | None = None,
 ) -> bool:
@@ -775,10 +775,32 @@ def _eligible_operation_infos(
 
 def _candidate_signature(
     info: OperationInfo,
-    source_idx: int,
+    source_idx: Any,
     params: dict[str, Any] | None,
 ):
-    return _transition_signature(info.name, source_idx, params)
+    return _transition_signature(info, source_idx, params)
+
+
+def _source_candidates(
+    info: OperationInfo,
+    gene_count: int,
+) -> list[Any]:
+    """Enumerate legal source-index tuples for one operation arity."""
+    if info.source_count == 1:
+        return list(range(gene_count))
+
+    indices = range(gene_count)
+
+    if info.ordered_sources:
+        return [
+            tuple(source)
+            for source in itertools.permutations(indices, info.source_count)
+        ]
+
+    return [
+        tuple(source)
+        for source in itertools.combinations(indices, info.source_count)
+    ]
 
 
 def _parameterless_valid_candidates(
@@ -803,7 +825,7 @@ def _parameterless_valid_candidates(
         if info.parameter_sampler is not None:
             continue
 
-        for source_idx in range(len(X)):
+        for source_idx in _source_candidates(info, len(X)):
             params: dict[str, Any] = {}
             signature = _candidate_signature(info, source_idx, params)
 
@@ -863,7 +885,10 @@ def _random_parameterized_candidate(
 
     for _ in range(max_attempts):
         info = infos[int(rng.integers(len(infos)))]
-        source_idx = int(rng.integers(len(X)))
+        source_space = _source_candidates(info, len(X))
+        if not source_space:
+            continue
+        source_idx = source_space[int(rng.integers(len(source_space)))]
         params = sample_operation_params(info, rng)
         signature = _candidate_signature(info, source_idx, params)
 
@@ -957,7 +982,7 @@ def _try_candidate_transactionally(
     meta: ProgramMeta,
     X: ProgramX,
     info: OperationInfo,
-    source_idx: int,
+    source_idx: Any,
     params: dict[str, Any],
 ) -> tuple[list[int], str | None]:
     """Apply one candidate and keep it only when all outputs are novel."""
