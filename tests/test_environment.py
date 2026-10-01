@@ -10,6 +10,7 @@ from notebooks.ops.environment import (
     STNodeRef,
     STSet,
     SolutionTree,
+    get_GP_pool,
     get_ST_unsolved_frontier,
     get_ST_unsovled_frontier,
     init_env,
@@ -710,6 +711,170 @@ def test_get_ST_unsovled_frontier_filters_matrix_nodes_by_dim():
         assert genes_exactly_equal(
             frontier[result_idx],
             SP_X[sp_gidx],
+        )
+
+
+def test_get_ST_unsovled_frontier_filters_by_dtype():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    bool_matrices = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+        dtype=bool,
+    )
+
+    # Only the three color-presence masks. Raw output is int64.
+    expected_gidx = (4, 6, 8)
+
+    assert bool_matrices.shape == (3,)
+
+    for result_idx, sp_gidx in enumerate(expected_gidx):
+        assert genes_exactly_equal(
+            bool_matrices[result_idx],
+            SP_X[sp_gidx],
+        )
+
+    int_scalars = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=0,
+        max_dim=0,
+        dtype=np.int64,
+    )
+
+    assert int_scalars.shape == (5,)
+
+
+def test_get_ST_unsovled_frontier_dtype_none_keeps_all_datatypes():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    scalar_frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=0,
+        max_dim=0,
+        dtype=None,
+    )
+
+    assert scalar_frontier.shape == (5,)
+
+
+def test_get_GP_pool_returns_complete_pool_without_filters():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    pool = get_GP_pool(GP_meta, GP_X)
+
+    assert pool.shape == (len(GP_X),)
+    assert pool.dtype == object
+
+    for gidx in range(len(GP_X)):
+        assert genes_exactly_equal(
+            pool[gidx],
+            GP_X[gidx],
+        )
+
+
+def test_get_GP_pool_filters_dim_and_dtype_symmetrically():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    scalar_pool = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+
+    # h, w, and three scalar color-ID genes.
+    assert scalar_pool.shape == (5,)
+
+    bool_matrix_pool = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=2,
+        max_dim=2,
+        dtype=np.bool_,
+    )
+
+    # Three color-presence masks.
+    assert bool_matrix_pool.shape == (3,)
+
+    int_matrix_pool = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=2,
+        max_dim=2,
+        dtype="int64",
+    )
+
+    # Raw input matrix only.
+    assert int_matrix_pool.shape == (1,)
+    assert genes_exactly_equal(
+        int_matrix_pool[0],
+        GP_X[0],
+    )
+
+
+def test_get_GP_pool_updates_as_GP_grows():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    before = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=2,
+        max_dim=2,
+        dtype=bool,
+    )
+
+    new_gidx = bool_complement(
+        GP_meta,
+        GP_X,
+        4,
+    )
+
+    after = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=2,
+        max_dim=2,
+        dtype=bool,
+    )
+
+    assert after.shape == (before.shape[0] + 1,)
+    assert genes_exactly_equal(
+        after[-1],
+        GP_X[new_gidx],
+    )
+
+
+def test_pool_helpers_validate_dtype_and_gp_side():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    with pytest.raises(TypeError, match="NumPy dtype"):
+        get_ST_unsovled_frontier(
+            ST,
+            SP_X,
+            dtype=object(),
+        )
+
+    with pytest.raises(TypeError, match="NumPy dtype"):
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+            dtype=object(),
+        )
+
+    with pytest.raises(ValueError, match="GP_meta.side"):
+        get_GP_pool(
+            SP_meta,
+            GP_X,
+        )
+
+    with pytest.raises(ValueError, match="GP_X.side"):
+        get_GP_pool(
+            GP_meta,
+            SP_X,
         )
 
 
