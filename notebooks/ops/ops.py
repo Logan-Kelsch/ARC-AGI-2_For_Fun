@@ -936,7 +936,8 @@ def _partition_composite_output_count(
 
 
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_partition_shape",
     output_count=1,
     min_dims_exclusive=0,
 )
@@ -963,7 +964,8 @@ def partition_shape(
 
 
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_partition_composite",
     output_count=None,
     output_count_estimator=_partition_composite_output_count,
     min_dims_exclusive=1,
@@ -1024,7 +1026,8 @@ def partition_composite(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool_sum",
     output_count=1,
     atomic_dtypes=(np.bool_,),
 )
@@ -1051,7 +1054,8 @@ def bool_sum(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool_cavity",
     output_count=1,
     atomic_dtypes=(np.bool_,),
     validator=_bool_has_true_validator,
@@ -1079,7 +1083,8 @@ def bool_cavity(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_bool_complement",
     output_count=1,
     atomic_dtypes=(np.bool_,),
 )
@@ -1106,7 +1111,8 @@ def bool_complement(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool2_union",
     output_count=1,
     source_count=2,
     ordered_sources=False,
@@ -1147,7 +1153,8 @@ def bool2_union(
 
 
 @operation(
-    full_partition=False,
+    partition="null",
+    inverse_op="inv_bool2_intersect",
     output_count=1,
     source_count=2,
     ordered_sources=False,
@@ -1188,7 +1195,8 @@ def bool2_intersect(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_mat2_cwrotate",
     output_count=1,
     allowed_dims=(2,),
 )
@@ -1215,7 +1223,8 @@ def mat2_cwrotate(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_dim0_flip",
     output_count=1,
     min_dims_exclusive=0,
 )
@@ -1242,7 +1251,8 @@ def dim0_flip(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_dim1_flip",
     output_count=1,
     min_dims_exclusive=1,
 )
@@ -1269,7 +1279,8 @@ def dim1_flip(
 
 
 @operation(
-    full_partition=False,
+    partition="or",
+    inverse_op="inv_dim2_flip",
     output_count=1,
     min_dims_exclusive=2,
 )
@@ -1296,7 +1307,8 @@ def dim2_flip(
 
 
 @operation(
-    full_partition=True,
+    partition="and",
+    inverse_op="inv_partition_bool_trim",
     output_count=2,
     min_dims_exclusive=0,
     atomic_dtypes=(np.bool_,),
