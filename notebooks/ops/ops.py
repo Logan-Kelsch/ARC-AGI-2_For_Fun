@@ -292,7 +292,10 @@ def values_exactly_equal(a: Any, b: Any) -> bool:
                 for x, y in zip(a.flat, b.flat)
             )
 
-        return bool(np.array_equal(a, b, equal_nan=True))
+        try:
+            return bool(np.array_equal(a, b, equal_nan=True))
+        except TypeError:
+            return bool(np.array_equal(a, b))
 
     if isinstance(a, dict) or isinstance(b, dict):
         if not isinstance(a, dict) or not isinstance(b, dict):
@@ -972,6 +975,7 @@ def GP_generate(
     rng = _rng(rng)
     generated: list[int] = []
     rejected_signatures: set[Any] = set()
+    parameterized_duplicate_rejections = 0
 
     while len(generated) < n_new_genes:
         remaining = n_new_genes - len(generated)
@@ -1038,10 +1042,20 @@ def GP_generate(
 
                 if new_indices:
                     generated.extend(new_indices)
+                    parameterized_duplicate_rejections = 0
                     continue
 
-                # A sampled parameterized candidate produced duplicate data.
-                # Continue to another loop iteration to sample again.
+                parameterized_duplicate_rejections += 1
+                if (
+                    parameterized_duplicate_rejections
+                    >= max_attempts_per_generation
+                ):
+                    print(
+                        "GP generation terminated: no novel gene was found "
+                        "within the sampled parameterized generation space."
+                    )
+                    break
+
                 continue
 
             print(
