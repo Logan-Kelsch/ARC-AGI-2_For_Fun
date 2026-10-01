@@ -453,3 +453,45 @@ both the original concrete target and its transformed target available until
 one path resolves the source.
 
 A correctly spelled alias, get_ST_unsolved_frontier, is also available.
+
+
+### Typed ST / GP pools
+
+The two core retrieval helpers now use the same filters:
+
+~~~python
+targets = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+
+candidates = get_GP_pool(
+    GP_meta,
+    GP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+~~~
+
+Both return 1D object arrays containing complete genes across all training
+samples.
+
+Use dtype=None for any datatype, including:
+
+~~~python
+get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=0,
+    max_dim=0,
+)
+~~~
+
+for every unresolved scalar target regardless of dtype.
+
+This provides the compatible target/candidate pools used for later exact
+solution matching.
