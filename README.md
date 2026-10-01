@@ -203,21 +203,31 @@ This creates one 1D gene.
 ### partition_composite
 
 ~~~python
-color_gidx, presence_gidx = partition_composite(
+generated_gidx = partition_composite(
     meta,
     X,
     source_idx,
 )
 ~~~
 
-This generates two genes:
+This creates two genes per distinct color observed across the complete sample
+set:
 
 ~~~text
-1. sorted 1D array of colors used
-2. 3D boolean array [num_colors, height, width]
+scalar int64 color ID
+2D boolean presence mask
 ~~~
 
-Presence channel i corresponds to color_ids[i].
+For three colors the partition produces six genes:
+
+~~~text
+color_1_id, color_1_presence,
+color_2_id, color_2_presence,
+color_3_id, color_3_presence
+~~~
+
+A color that is absent from one sample receives an all-False presence mask for
+that sample, keeping gene indices aligned across demonstrations.
 
 Both initial operations are full partitions and are therefore legal on SP.
 
@@ -240,27 +250,23 @@ SP_X[0] = output grids across training samples
 
 Then partition_shape and partition_composite are applied to gene 0 on both sides.
 
-The initial program layout is:
+The initial program layout is variable-length:
 
 ~~~text
 gidx   operation                source   dims
 
 0      raw_input/raw_output     -1       2
 1      partition_shape           0       1
-2      partition_composite       0       1   color IDs
-3      partition_composite       0       3   color presence
+2      partition_composite       0       0   first color ID
+3      partition_composite       0       2   first color mask
+4      partition_composite       0       0   second color ID
+5      partition_composite       0       2   second color mask
+...    ...                        ...     ...
 ~~~
 
-The initial SP structure produces:
-
-~~~text
-SP g0: raw_output
-├── SP g1: partition_shape
-├── SP g2: partition_composite   dims=1
-└── SP g3: partition_composite   dims=3
-~~~
-
-Every ST node begins unresolved with gp_gidx=-1.
+For C distinct colors, that side starts with `2 + 2*C` genes. ST is built
+directly from the resulting SP structure, and every node begins unresolved with
+gp_gidx=-1.
 
 ---
 
