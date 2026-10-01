@@ -1183,3 +1183,109 @@ available 2D bool GP genes
 ~~~
 
 which can be passed directly into the later exact solution-matching layer.
+
+
+## Exact 0D one-gene solving
+
+The first scalar solver is:
+
+~~~python
+solutions = solve_0dim_1gene_basic(
+    GP_pool,
+    ST_frontier,
+    GP_X=GP_X,
+    SP_X=SP_X,
+    ST=ST,
+)
+~~~
+
+It expects GP_pool and ST_frontier to contain only 0D genes.
+
+The solver is not a statistical regressor. It searches an explicit
+minimum-complexity symbolic hierarchy and accepts only exact zero-residual
+relationships across every training sample.
+
+Search order:
+
+~~~text
+0  y = x
+1  y = -x
+2  y = abs(x)
+3  y = x^2
+4  y = x + c
+5  y = c - x
+6  y = c*x
+7  y = a*x + b
+~~~
+
+x-c is already represented by x+c with a negative constant. x/c is represented
+by scaling with a reciprocal constant.
+
+One-parameter fitted rules require at least two training samples.
+
+The affine rule requires at least three samples and at least two distinct
+source values, preventing the trivial two-point line interpolation case.
+
+Every candidate must match the frontier target exactly across every sample.
+The target scalar dtype is retained and recorded in the returned solution.
+
+Successful solves are written directly into ST:
+
+~~~text
+gp_gidx
+solution_rule
+solution_params
+~~~
+
+so ST can distinguish:
+
+~~~text
+target solved by GP gene 17 through y = x
+~~~
+
+from:
+
+~~~text
+target solved by GP gene 17 through y = x + 2
+~~~
+
+The returned Scalar1GeneSolution objects expose:
+
+~~~text
+sp_gidx
+gp_gidx
+rule
+params
+target_dtype
+complexity_level
+expression
+~~~
+
+Within one rule family, simpler fitted constants are preferred, followed by
+lower GP gene index. Rule-complexity level always dominates those tie-breakers.
+
+A typical notebook flow is:
+
+~~~python
+GP_pool_0d = get_GP_pool(
+    GP_meta,
+    GP_X,
+    min_dim=0,
+    max_dim=0,
+)
+
+ST_frontier_0d = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=0,
+    max_dim=0,
+)
+
+solutions = solve_0dim_1gene_basic(
+    GP_pool_0d,
+    ST_frontier_0d,
+    GP_X=GP_X,
+    SP_X=SP_X,
+    ST=ST,
+)
+~~~
