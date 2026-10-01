@@ -13,8 +13,10 @@ from notebooks.ops.ops import (
     GP_generate,
     OP_REGISTRY,
     SP_generate,
+    equivalent_gene_idx,
     generation_exists,
     gene_atomic_dtypes,
+    genes_exactly_equal,
     operation,
     partition_composite,
     partition_shape,
@@ -464,7 +466,7 @@ def test_exact_transition_duplicate_includes_operation_source_and_params():
     OP_REGISTRY.pop("test_take_n", None)
 
 
-def test_gp_generate_adds_requested_number_of_new_genes_without_duplicate_transitions():
+def test_gp_generate_never_retains_equivalent_gene_data():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
     before = len(GP_X)
@@ -472,37 +474,18 @@ def test_gp_generate_adds_requested_number_of_new_genes_without_duplicate_transi
     new_gidx = GP_generate(
         GP_meta,
         GP_X,
-        5,
+        20,
         rng=7,
         operation_names=("partition_shape", "partition_composite"),
     )
 
-    assert len(new_gidx) == 5
-    assert len(GP_X) == before + 5
+    assert len(new_gidx) > 0
+    assert len(GP_X) == before + len(new_gidx)
     assert len(GP_meta) == len(GP_X)
-    assert new_gidx == list(range(before, before + 5))
 
-    signatures = [
-        (
-            GP_meta.op[gidx],
-            GP_meta.source[gidx],
-            GP_meta.params[gidx],
-        )
-        for gidx in range(len(GP_meta))
-    ]
-
-    # partition_composite legitimately has two outputs from one invocation.
-    # No later generation may repeat an already existing exact invocation.
-    generated_signatures = [
-        (
-            GP_meta.op[gidx],
-            GP_meta.source[gidx],
-            tuple(sorted(GP_meta.params[gidx].items())),
-        )
-        for gidx in new_gidx
-    ]
-
-    assert len(generated_signatures) == len(set(generated_signatures))
+    for i in range(len(GP_X)):
+        for j in range(i):
+            assert not genes_exactly_equal(GP_X[i], GP_X[j])
 
 
 def test_gp_generate_zero_is_noop():
@@ -600,3 +583,183 @@ def test_parameter_sampler_supports_future_integer_parameter_ops():
     }) == 3
 
     OP_REGISTRY.pop("test_param_op", None)
+
+
+
+def test_equivalent_gene_idx_requires_exact_shape_dtype_and_contents():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array([[1, 2]], dtype=np.int64),
+            np.array([[3, 4]], dtype=np.int64),
+        ],
+        raw_op="raw_input",
+    )
+
+    exact = np.empty(2, dtype=object)
+    exact[0] = np.array([[1, 2]], dtype=np.int64)
+    exact[1] = np.array([[3, 4]], dtype=np.int64)
+
+    different_shape = np.empty(2, dtype=object)
+    different_shape[0] = np.array([1, 2], dtype=np.int64)
+    different_shape[1] = np.array([3, 4], dtype=np.int64)
+
+    different_dtype = np.empty(2, dtype=object)
+    different_dtype[0] = np.array([[1, 2]], dtype=np.float64)
+    different_dtype[1] = np.array([[3, 4]], dtype=np.float64)
+
+    different_contents = np.empty(2, dtype=object)
+    different_contents[0] = np.array([[1, 9]], dtype=np.int64)
+    different_contents[1] = np.array([[3, 4]], dtype=np.int64)
+
+    assert equivalent_gene_idx(X, exact) == 0
+    assert equivalent_gene_idx(X, different_shape) == -1
+    assert equivalent_gene_idx(X, different_dtype) == -1
+    assert equivalent_gene_idx(X, different_contents) == -1
+
+
+def test_duplicate_output_operation_is_rolled_back_and_space_exhausts(capsys):
+    @operation(
+        full_partition=False,
+        output_count=1,
+        min_dims_exclusive=-1,
+    )
+    def test_identity_copy(meta, X, source_idx):
+        values = [
+            np.asarray(value).copy()
+            for value in X[source_idx]
+        ]
+        gidx = X.append_gene(values)
+        meta.append(
+            source=source_idx,
+            op="test_identity_copy",
+            dims=meta.dims[source_idx],
+        )
+        return gidx
+
+    meta, X = _raw_program(
+        "GP",
+        [np.array([[1, 2]], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    created = GP_generate(
+        meta,
+        X,
+        1,
+        rng=0,
+        operation_names=("test_identity_copy",),
+    )
+
+    output = capsys.readouterr().out
+
+    assert created == []
+    assert len(meta) == 1
+    assert len(X) == 1
+    assert (
+        "entire legal generation space was explored"
+        in output
+    )
+
+    OP_REGISTRY.pop("test_identity_copy", None)
+
+
+def test_multi_output_operation_rolls_back_if_any_output_duplicates(capsys):
+    @operation(
+        full_partition=False,
+        output_count=2,
+        min_dims_exclusive=-1,
+    )
+    def test_mixed_outputs(meta, X, source_idx):
+        duplicate_values = [
+            np.asarray(value).copy()
+            for value in X[source_idx]
+        ]
+        novel_values = [
+            np.asarray(value) + 100
+            for value in X[source_idx]
+        ]
+
+        first = X.append_gene(duplicate_values)
+        meta.append(
+            source=source_idx,
+            op="test_mixed_outputs",
+            dims=meta.dims[source_idx],
+        )
+
+        second = X.append_gene(novel_values)
+        meta.append(
+            source=source_idx,
+            op="test_mixed_outputs",
+            dims=meta.dims[source_idx],
+        )
+
+        return first, second
+
+    meta, X = _raw_program(
+        "GP",
+        [np.array([1, 2], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    created = GP_generate(
+        meta,
+        X,
+        2,
+        rng=0,
+        operation_names=("test_mixed_outputs",),
+    )
+
+    capsys.readouterr()
+
+    assert created == []
+    assert len(meta) == 1
+    assert len(X) == 1
+
+    OP_REGISTRY.pop("test_mixed_outputs", None)
+
+
+def test_sp_generation_rolls_back_duplicate_data_and_reports_exhaustion(capsys):
+    @operation(
+        full_partition=True,
+        output_count=1,
+        min_dims_exclusive=-1,
+    )
+    def test_sp_identity(meta, X, source_idx):
+        values = [
+            np.asarray(value).copy()
+            for value in X[source_idx]
+        ]
+        gidx = X.append_gene(values)
+        meta.append(
+            source=source_idx,
+            op="test_sp_identity",
+            dims=meta.dims[source_idx],
+        )
+        return gidx
+
+    meta, X = _raw_program(
+        "SP",
+        [np.array([[1]], dtype=np.int64)],
+        raw_op="raw_output",
+    )
+    ST = SolutionTree.from_sp_meta(meta)
+
+    created = SP_generate(
+        meta,
+        X,
+        ST,
+        rng=0,
+        operation_names=("test_sp_identity",),
+    )
+
+    output = capsys.readouterr().out
+
+    assert created == []
+    assert len(meta) == len(X) == len(ST) == 1
+    assert (
+        "entire legal generation space was explored"
+        in output
+    )
+
+    OP_REGISTRY.pop("test_sp_identity", None)
