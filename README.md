@@ -495,3 +495,33 @@ for every unresolved scalar target regardless of dtype.
 
 This provides the compatible target/candidate pools used for later exact
 solution matching.
+
+
+### Exact scalar one-gene solver
+
+~~~python
+solutions = solve_0dim_1gene_basic(
+    GP_pool_0d,
+    ST_frontier_0d,
+    GP_X=GP_X,
+    SP_X=SP_X,
+    ST=ST,
+)
+~~~
+
+searches exact scalar relationships in increasing complexity:
+
+~~~text
+x
+-x
+abs(x)
+x^2
+x + c
+c - x
+c*x
+a*x + b
+~~~
+
+Only zero-residual relationships across every training sample are accepted.
+Successful matches update ST with the supporting GP gene, symbolic rule, and
+fitted parameters.
