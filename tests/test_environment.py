@@ -15,7 +15,9 @@ from notebooks.ops.ops import (
     SP_generate,
     bool2_intersect,
     bool2_union,
+    bool_cavity,
     bool_complement,
+    bool_sum,
     dim0_flip,
     dim1_flip,
     dim2_flip,
@@ -1127,3 +1129,220 @@ def test_gp_generate_can_discover_binary_boolean_operation():
     assert len(created) == 1
     assert meta.op[created[0]] == "bool2_union"
     assert meta.source[created[0]] == (first, second)
+
+
+
+def test_bool_sum_counts_true_values_and_returns_scalar_int64():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array([[True, False, True]], dtype=bool),
+            np.array([[True, True, False, True]], dtype=bool),
+        ],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, bool_sum, 0)
+
+    gidx = bool_sum(meta, X, 0)
+
+    assert meta.source[gidx] == 0
+    assert meta.dims[gidx] == 0
+    assert isinstance(X[gidx, 0], np.int64)
+    assert isinstance(X[gidx, 1], np.int64)
+    assert X[gidx, 0] == 2
+    assert X[gidx, 1] == 3
+
+
+def test_bool_sum_accepts_scalar_bool_and_rejects_non_bool():
+    scalar_meta = ProgramMeta(side="GP")
+    scalar_X = ProgramX(side="GP", sample_count=1)
+    scalar_X.append_gene([np.bool_(True)])
+    scalar_meta.append(source=-1, op="raw_bool", dims=0)
+
+    assert valid_generation(scalar_meta, scalar_X, bool_sum, 0)
+
+    gidx = bool_sum(scalar_meta, scalar_X, 0)
+
+    assert scalar_meta.dims[gidx] == 0
+    assert isinstance(scalar_X[gidx, 0], np.int64)
+    assert scalar_X[gidx, 0] == 1
+
+    int_meta, int_X = _raw_program(
+        "GP",
+        [np.array([0, 1], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    assert not valid_generation(int_meta, int_X, bool_sum, 0)
+
+
+def test_bool_cavity_matches_requested_1d_examples():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array([False, True, False, True, False], dtype=bool),
+            np.array([False, True, False, False, True], dtype=bool),
+        ],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, bool_cavity, 0)
+
+    gidx = bool_cavity(meta, X, 0)
+
+    assert np.array_equal(
+        X[gidx, 0],
+        np.array([False, False, True, False, False], dtype=bool),
+    )
+    assert np.array_equal(
+        X[gidx, 1],
+        np.array([False, False, True, True, False], dtype=bool),
+    )
+
+
+def test_bool_cavity_matches_requested_2d_example():
+    source = np.array(
+        [
+            [False, True, False],
+            [True, False, True],
+            [False, True, False],
+        ],
+        dtype=bool,
+    )
+
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    gidx = bool_cavity(meta, X, 0)
+
+    assert np.array_equal(
+        X[gidx, 0],
+        np.array(
+            [
+                [False, False, False],
+                [False, True, False],
+                [False, False, False],
+            ],
+            dtype=bool,
+        ),
+    )
+
+
+def test_bool_cavity_uses_axis_adjacent_connectivity_not_diagonals():
+    source = np.array(
+        [
+            [False, True, False],
+            [True, False, True],
+            [False, True, False],
+        ],
+        dtype=bool,
+    )
+
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    gidx = bool_cavity(meta, X, 0)
+
+    # The center is diagonally adjacent to boundary False cells, but diagonal
+    # contact does not open the cavity.
+    assert X[gidx, 0][1, 1]
+
+
+def test_bool_cavity_marks_multiple_enclosed_regions():
+    source = np.array(
+        [
+            [True, True, True, True, True, True, True],
+            [True, False, True, True, True, False, True],
+            [True, False, True, False, True, False, True],
+            [True, True, True, True, True, True, True],
+        ],
+        dtype=bool,
+    )
+
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    gidx = bool_cavity(meta, X, 0)
+
+    expected = np.logical_not(source)
+
+    assert np.array_equal(X[gidx, 0], expected)
+
+
+def test_bool_cavity_does_not_mark_false_region_connected_to_boundary():
+    source = np.array(
+        [
+            [False, True, True, True],
+            [False, False, True, True],
+            [True, False, False, True],
+            [True, True, True, True],
+        ],
+        dtype=bool,
+    )
+
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    gidx = bool_cavity(meta, X, 0)
+
+    assert not np.any(X[gidx, 0])
+
+
+def test_bool_cavity_requires_boolean_source_with_true_in_every_sample():
+    no_true_meta, no_true_X = _raw_program(
+        "GP",
+        [np.zeros((2, 2), dtype=bool)],
+        raw_op="raw_input",
+    )
+
+    assert not valid_generation(
+        no_true_meta,
+        no_true_X,
+        bool_cavity,
+        0,
+    )
+
+    int_meta, int_X = _raw_program(
+        "GP",
+        [np.array([[0, 1]], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    assert not valid_generation(
+        int_meta,
+        int_X,
+        bool_cavity,
+        0,
+    )
+
+
+def test_bool_cavity_accepts_scalar_true_and_returns_scalar_false():
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=1)
+    X.append_gene([np.bool_(True)])
+    meta.append(source=-1, op="raw_bool", dims=0)
+
+    assert valid_generation(meta, X, bool_cavity, 0)
+
+    gidx = bool_cavity(meta, X, 0)
+
+    assert meta.dims[gidx] == 0
+    assert bool(X[gidx, 0]) is False
+
+
+def test_bool_sum_and_cavity_are_gp_only():
+    assert OP_REGISTRY["bool_sum"].full_partition is False
+    assert OP_REGISTRY["bool_cavity"].full_partition is False
