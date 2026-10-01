@@ -827,11 +827,11 @@ def test_bool2_union_and_intersection_use_two_same_shaped_boolean_sources():
     meta, X, first, second = _two_bool_gene_program(
         [
             np.array([[True, False], [False, True]], dtype=bool),
-            np.array([True, False], dtype=bool),
+            np.array([[True, False]], dtype=bool),
         ],
         [
             np.array([[False, True], [False, True]], dtype=bool),
-            np.array([False, True], dtype=bool),
+            np.array([[False, True]], dtype=bool),
         ],
     )
 
@@ -855,11 +855,11 @@ def test_bool2_union_and_intersection_use_two_same_shaped_boolean_sources():
 
     assert np.array_equal(
         X[union_gidx, 1],
-        np.array([True, True], dtype=bool),
+        np.array([[True, True]], dtype=bool),
     )
     assert np.array_equal(
         X[intersect_gidx, 1],
-        np.array([False, False], dtype=bool),
+        np.array([[False, False]], dtype=bool),
     )
 
 
