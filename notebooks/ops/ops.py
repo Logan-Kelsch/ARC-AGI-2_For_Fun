@@ -19,8 +19,12 @@ from .environment import (
 
 ParameterSampler = Callable[[np.random.Generator], dict[str, Any]]
 GenerationValidator = Callable[
-    [ProgramMeta, ProgramX, int, dict[str, Any]],
+    [ProgramMeta, ProgramX, Any, dict[str, Any]],
     bool,
+]
+OutputCountEstimator = Callable[
+    [ProgramMeta, ProgramX, Any, dict[str, Any]],
+    int,
 ]
 
 
@@ -46,7 +50,8 @@ class OperationInfo:
 
     name: str
     full_partition: bool
-    output_count: int
+    output_count: int | None
+    output_count_estimator: OutputCountEstimator | None = None
     source_count: int = 1
     ordered_sources: bool = True
     min_dims_exclusive: int | None = None
@@ -71,7 +76,8 @@ def _normalize_dtypes(
 def operation(
     *,
     full_partition: bool,
-    output_count: int,
+    output_count: int | None,
+    output_count_estimator: OutputCountEstimator | None = None,
     source_count: int = 1,
     ordered_sources: bool = True,
     min_dims_exclusive: int | None = None,
@@ -89,7 +95,11 @@ def operation(
     The decorator also validates every direct operation application, so manual
     notebook calls and random generation obey the same rules.
     """
-    if output_count < 1:
+    if output_count is None and output_count_estimator is None:
+        raise ValueError(
+            "Dynamic-output operations require output_count_estimator."
+        )
+    if output_count is not None and output_count < 1:
         raise ValueError("output_count must be >= 1.")
     if source_count < 1:
         raise ValueError("source_count must be >= 1.")
@@ -108,7 +118,10 @@ def operation(
         info = OperationInfo(
             name=func.__name__,
             full_partition=bool(full_partition),
-            output_count=int(output_count),
+            output_count=(
+                None if output_count is None else int(output_count)
+            ),
+            output_count_estimator=output_count_estimator,
             source_count=int(source_count),
             ordered_sources=bool(ordered_sources),
             min_dims_exclusive=min_dims_exclusive,
@@ -152,6 +165,14 @@ def operation(
                     f"{meta.side} gene {source_idx}: {reason}"
                 )
 
+            expected_output_count = operation_output_count(
+                info,
+                meta,
+                X,
+                source_idx,
+                params=params,
+            )
+
             meta_before = len(meta)
             x_before = len(X)
 
@@ -160,10 +181,14 @@ def operation(
             meta_added = len(meta) - meta_before
             x_added = len(X) - x_before
 
-            if meta_added != info.output_count or x_added != info.output_count:
+            if (
+                meta_added != expected_output_count
+                or x_added != expected_output_count
+            ):
                 raise RuntimeError(
-                    f"Operation {info.name!r} declared {info.output_count} "
-                    f"outputs but added meta={meta_added}, X={x_added}."
+                    f"Operation {info.name!r} expected "
+                    f"{expected_output_count} outputs but added "
+                    f"meta={meta_added}, X={x_added}."
                 )
 
             if len(meta) != len(X):
@@ -434,6 +459,42 @@ def _resolve_operation(
     raise TypeError(
         "op must be an operation name, OperationInfo, or registered callable."
     )
+
+
+def operation_output_count(
+    op: str | OperationInfo | Callable,
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    *,
+    params: dict[str, Any] | None = None,
+) -> int:
+    """Return the output count for one exact operation application."""
+    info = _resolve_operation(op)
+
+    if info.output_count is not None:
+        return int(info.output_count)
+
+    if info.output_count_estimator is None:
+        raise RuntimeError(
+            f"Operation {info.name!r} has no output-count definition."
+        )
+
+    count = int(
+        info.output_count_estimator(
+            meta,
+            X,
+            _canonical_source(info, source_idx),
+            _copy_params(params),
+        )
+    )
+
+    if count < 1:
+        raise ValueError(
+            f"Operation {info.name!r} estimated invalid output count {count}."
+        )
+
+    return count
 
 
 def generation_exists(
