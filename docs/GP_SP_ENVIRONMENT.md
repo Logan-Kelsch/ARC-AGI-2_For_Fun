@@ -722,9 +722,9 @@ and:
 For an all-False source, the offset is all zeros and the remaining structure is
 empty along every dimension.
 
-Because partition_bool_trim is marked full_partition=True, it is the only one
-of this new operation group that SP_generate may use. The boolean set
-operations, rotations, and flips remain GP-only transformations.
+partition_bool_trim is an AND partition. Reversible unary transforms such as
+rotation and flips are OR partitions and are also SP-legal. Multi-source
+boolean set operations remain NULL/GP-only.
 
 
 ## bool_sum
