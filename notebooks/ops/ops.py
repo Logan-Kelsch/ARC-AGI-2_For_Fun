@@ -656,6 +656,86 @@ def _validate_sources(
     return indices
 
 
+def _bool_has_true_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    """Require at least one True in every instantiated sample."""
+    source = _source_tuple(source_idx)[0]
+
+    return all(
+        bool(np.any(np.asarray(X[source, sample_idx], dtype=bool)))
+        for sample_idx in range(X.sample_count)
+    )
+
+
+def _bool_cavity_mask(array: np.ndarray) -> np.ndarray:
+    """Return False cells enclosed by True using axis-adjacent connectivity."""
+    array = np.asarray(array, dtype=bool)
+
+    if array.ndim == 0:
+        return np.asarray(False, dtype=bool)
+
+    false_mask = np.logical_not(array)
+    reachable = np.zeros(array.shape, dtype=bool)
+
+    if not np.any(false_mask):
+        return reachable
+
+    stack: list[tuple[int, ...]] = []
+
+    for axis in range(array.ndim):
+        for boundary_index in (0, array.shape[axis] - 1):
+            slicer = [slice(None)] * array.ndim
+            slicer[axis] = boundary_index
+
+            boundary_false = np.argwhere(false_mask[tuple(slicer)])
+
+            for reduced_coord in boundary_false:
+                coord = []
+                reduced_pos = 0
+
+                for dim in range(array.ndim):
+                    if dim == axis:
+                        coord.append(boundary_index)
+                    else:
+                        coord.append(int(reduced_coord[reduced_pos]))
+                        reduced_pos += 1
+
+                coord_tuple = tuple(coord)
+
+                if not reachable[coord_tuple]:
+                    reachable[coord_tuple] = True
+                    stack.append(coord_tuple)
+
+    while stack:
+        coord = stack.pop()
+
+        for axis in range(array.ndim):
+            for delta in (-1, 1):
+                neighbor = list(coord)
+                neighbor[axis] += delta
+
+                if (
+                    neighbor[axis] < 0
+                    or neighbor[axis] >= array.shape[axis]
+                ):
+                    continue
+
+                neighbor_tuple = tuple(neighbor)
+
+                if (
+                    false_mask[neighbor_tuple]
+                    and not reachable[neighbor_tuple]
+                ):
+                    reachable[neighbor_tuple] = True
+                    stack.append(neighbor_tuple)
+
+    return np.logical_and(false_mask, np.logical_not(reachable))
+
+
 def _bool2_same_shape_validator(
     meta: ProgramMeta,
     X: ProgramX,
@@ -833,6 +913,61 @@ def partition_composite(
 
     return color_gidx, presence_gidx
 
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    atomic_dtypes=(np.bool_,),
+)
+def bool_sum(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Count cumulative True values in each instantiated boolean source."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        np.int64(np.count_nonzero(np.asarray(value, dtype=bool)))
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="bool_sum",
+    )
+
+
+@operation(
+    full_partition=False,
+    output_count=1,
+    atomic_dtypes=(np.bool_,),
+    validator=_bool_has_true_validator,
+)
+def bool_cavity(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Mark False regions fully enclosed by True values."""
+    source_idx = _validate_source(meta, X, source_idx)
+
+    values = [
+        _bool_cavity_mask(np.asarray(value, dtype=bool))
+        for value in X[source_idx]
+    ]
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="bool_cavity",
+    )
 
 
 @operation(
