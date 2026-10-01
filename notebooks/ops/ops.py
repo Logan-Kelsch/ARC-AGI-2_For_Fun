@@ -1897,7 +1897,14 @@ def SP_generate(
                 continue
 
             if ST is not None:
-                ST.sync(SP_meta)
+                ST.register_generation(
+                    SP_meta,
+                    source_gidx=int(source_idx),
+                    generated_gidxs=new_indices,
+                    partition=info.partition,
+                    inverse_op=info.inverse_op,
+                    op_name=info.name,
+                )
 
             return new_indices
 
