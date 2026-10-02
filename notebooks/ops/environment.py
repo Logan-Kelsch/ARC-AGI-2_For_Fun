@@ -326,6 +326,21 @@ class SolutionTree:
 
     nodes: dict[STNodeId, STNode] = field(default_factory=dict)
     roots: tuple[STNodeId, ...] = (0,)
+    _GP_meta: ProgramMeta | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _GP_X: ProgramX | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _SP_X: ProgramX | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_sp_meta(cls, SP_meta: ProgramMeta) -> "SolutionTree":
@@ -349,6 +364,34 @@ class SolutionTree:
             )
 
         return tree
+
+    def bind_environment(
+        self,
+        GP_meta: ProgramMeta,
+        GP_X: ProgramX,
+        SP_X: ProgramX,
+    ) -> None:
+        """Bind the live programs needed to distill solved ST proofs."""
+        if GP_meta.side != "GP" or GP_X.side != "GP":
+            raise ValueError("ST GP binding requires GP-side meta/X.")
+        if SP_X.side != "SP":
+            raise ValueError("ST SP binding requires SP_X.side == 'SP'.")
+        if len(GP_meta) != len(GP_X):
+            raise ValueError(
+                "GP_meta and GP_X must contain the same number of genes."
+            )
+
+        self._GP_meta = GP_meta
+        self._GP_X = GP_X
+        self._SP_X = SP_X
+
+    @property
+    def has_bound_environment(self) -> bool:
+        return (
+            self._GP_meta is not None
+            and self._GP_X is not None
+            and self._SP_X is not None
+        )
 
     def __len__(self) -> int:
         return len(self.nodes)
@@ -1203,5 +1246,6 @@ def init_env(
         shape_gidxs=shape_gidxs,
         composite_gidxs=composite_gidxs,
     )
+    ST.bind_environment(GP_meta, GP_X, SP_X)
 
     return GP_meta, GP_X, SP_meta, SP_X, ST
