@@ -1769,6 +1769,95 @@ def _valid_sources_for_operation(
     return valid_sources
 
 
+def _mean_parent_source_index(
+    meta: ProgramMeta,
+    candidate_gidx: int,
+) -> float:
+    """Return one provenance index for weighting a candidate source gene.
+
+    Single-source genes use that exact parent index. Multi-source genes use
+    the mean of their parent indices so provenance weighting remains symmetric
+    with respect to source ordering.
+    """
+    source = meta.source[int(candidate_gidx)]
+
+    if isinstance(source, tuple):
+        return float(np.mean(np.asarray(source, dtype=float)))
+
+    return float(source)
+
+
+def _candidate_source_score(
+    meta: ProgramMeta,
+    source_idx: Any,
+    *,
+    operation_count: int,
+) -> float:
+    """Score one legal source/source-tuple from its parent provenance.
+
+    The requested score is a negative logarithm whose base depends on the
+    registry size. Because raw genes use parent source -1, x + 2 is used as
+    the finite extension of x + 1:
+
+        score = -log_(k + 1)(x + 2)
+
+    where x is the parent-source index of the candidate gene. For a
+    multi-source candidate, component scores are averaged.
+    """
+    if operation_count < 1:
+        raise ValueError("operation_count must be >= 1.")
+
+    candidate_indices = _source_tuple(source_idx)
+    denominator = np.log(float(operation_count + 1))
+
+    scores = []
+
+    for gidx in candidate_indices:
+        x = _mean_parent_source_index(meta, gidx)
+        shifted = x + 2.0
+
+        if shifted <= 0.0:
+            raise ValueError(
+                "Candidate provenance produced a non-positive log argument."
+            )
+
+        scores.append(
+            -np.log(shifted) / denominator
+        )
+
+    return float(np.mean(scores))
+
+
+def _source_selection_probabilities(
+    meta: ProgramMeta,
+    valid_sources: list[Any],
+) -> np.ndarray:
+    """Return base-e softmax probabilities for legal source candidates."""
+    if not valid_sources:
+        return np.empty(0, dtype=float)
+
+    operation_count = len(OP_REGISTRY)
+
+    if operation_count < 1:
+        raise RuntimeError("OP_REGISTRY must contain at least one operation.")
+
+    scores = np.asarray(
+        [
+            _candidate_source_score(
+                meta,
+                source_idx,
+                operation_count=operation_count,
+            )
+            for source_idx in valid_sources
+        ],
+        dtype=float,
+    )
+
+    # Stable base-e softmax.
+    exp_scores = np.exp(scores - np.max(scores))
+    return exp_scores / np.sum(exp_scores)
+
+
 def _sample_uniform_legal_candidate(
     meta: ProgramMeta,
     X: ProgramX,
@@ -1777,11 +1866,14 @@ def _sample_uniform_legal_candidate(
     max_output_count: int | None = None,
     operation_names: Iterable[str] | None = None,
 ) -> tuple[OperationInfo, Any, dict[str, Any]] | None:
-    """Sample operation first, then source, each uniformly.
+    """Sample operation uniformly, then source by provenance softmax.
 
     Every legal operation receives exactly one slot in the first-stage draw,
-    regardless of how many valid source genes it can consume.  After one
-    operation is selected, its legal source/source-tuples are sampled uniformly.
+    regardless of how many valid source genes it can consume. After one
+    operation is selected, its legal source/source-tuples are scored from the
+    parent-source indices of the candidate genes and sampled with base-e
+    softmax probabilities. Earlier provenance therefore receives more weight,
+    while sibling genes created from the same source receive the same weight.
 
     All current built-in operations are parameterless.  For future
     parameterized operations, one parameter realization is sampled while
@@ -1817,8 +1909,17 @@ def _sample_uniform_legal_candidate(
     info, params, valid_sources = legal_operations[
         int(rng.integers(len(legal_operations)))
     ]
+    source_probabilities = _source_selection_probabilities(
+        meta,
+        valid_sources,
+    )
     source_idx = valid_sources[
-        int(rng.integers(len(valid_sources)))
+        int(
+            rng.choice(
+                len(valid_sources),
+                p=source_probabilities,
+            )
+        )
     ]
 
     return info, source_idx, params

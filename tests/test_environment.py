@@ -45,6 +45,7 @@ from notebooks.ops.ops import (
     partition_shape,
     valid_generation,
     _sample_uniform_legal_candidate,
+    _source_selection_probabilities,
 )
 
 
@@ -1309,14 +1310,89 @@ def test_uniform_operation_sampling_is_not_weighted_by_source_count():
     # gives each legal operation one equal first-stage slot.
     assert 0.45 <= one_share <= 0.55
 
-    five_total = op_counts["test_five_source_op"]
-
-    for count in five_source_counts.values():
-        source_share = count / five_total
-        assert 0.16 <= source_share <= 0.24
+    # Operation selection remains uniform. Source selection is intentionally
+    # no longer uniform and is tested separately below.
+    assert sum(five_source_counts.values()) == op_counts["test_five_source_op"]
 
     OP_REGISTRY.pop("test_one_source_op", None)
     OP_REGISTRY.pop("test_five_source_op", None)
+
+
+def test_source_selection_softmax_prefers_earlier_parent_sources():
+    meta = ProgramMeta(side="GP")
+
+    meta.append(source=-1, op="raw", dims=0)   # candidate 0, x=-1
+    meta.append(source=0, op="child_a", dims=0) # candidate 1, x=0
+    meta.append(source=0, op="child_b", dims=0) # candidate 2, x=0
+    meta.append(source=2, op="later", dims=0)   # candidate 3, x=2
+
+    valid_sources = [0, 1, 2, 3]
+    probabilities = _source_selection_probabilities(
+        meta,
+        valid_sources,
+    )
+
+    assert np.isclose(np.sum(probabilities), 1.0)
+    assert probabilities[0] > probabilities[1]
+    assert np.isclose(probabilities[1], probabilities[2])
+    assert probabilities[2] > probabilities[3]
+
+
+def test_source_selection_softmax_matches_requested_log_score_formula():
+    meta = ProgramMeta(side="GP")
+    meta.append(source=-1, op="raw", dims=0)
+    meta.append(source=0, op="child", dims=0)
+    meta.append(source=3, op="later", dims=0)
+
+    valid_sources = [0, 1, 2]
+    probabilities = _source_selection_probabilities(
+        meta,
+        valid_sources,
+    )
+
+    k = len(OP_REGISTRY)
+    x = np.asarray([-1.0, 0.0, 3.0])
+    scores = -np.log(x + 2.0) / np.log(k + 1.0)
+    expected = np.exp(scores - np.max(scores))
+    expected /= np.sum(expected)
+
+    assert np.allclose(probabilities, expected)
+
+
+def test_source_selection_softmax_uses_candidate_gene_parent_not_candidate_gidx():
+    meta = ProgramMeta(side="GP")
+
+    # These are far apart in candidate gidx but share the same provenance.
+    meta.append(source=-1, op="raw", dims=0)
+    meta.append(source=0, op="a", dims=0)
+    meta.append(source=0, op="b", dims=0)
+    meta.append(source=0, op="c", dims=0)
+    meta.append(source=0, op="d", dims=0)
+
+    probabilities = _source_selection_probabilities(
+        meta,
+        [1, 4],
+    )
+
+    assert np.allclose(probabilities, [0.5, 0.5])
+
+
+def test_source_selection_softmax_handles_multi_source_candidate_symmetrically():
+    meta = ProgramMeta(side="GP")
+    meta.append(source=-1, op="raw", dims=0)
+    meta.append(source=0, op="a", dims=0)
+    meta.append(source=2, op="b", dims=0)
+
+    forward = _source_selection_probabilities(
+        meta,
+        [(1, 2), (0, 2)],
+    )
+    reverse = _source_selection_probabilities(
+        meta,
+        [(2, 1), (2, 0)],
+    )
+
+    assert np.allclose(forward, reverse)
 
 
 def test_gp_duplicate_retry_keeps_same_prior_until_100_failure_switch(capsys):
