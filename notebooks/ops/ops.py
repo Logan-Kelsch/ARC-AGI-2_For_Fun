@@ -1672,6 +1672,18 @@ def _valid_sources_for_operation(
     valid_sources: list[Any] = []
 
     for source_idx in _source_candidates(info, len(X)):
+        # Establish semantic legality before asking operation-specific
+        # questions such as dynamic output count. Some estimators assume a
+        # compatible, non-empty source and should never see rejected sources.
+        if not valid_generation(
+            meta,
+            X,
+            info,
+            source_idx,
+            params=params,
+        ):
+            continue
+
         if (
             max_output_count is not None
             and operation_output_count(
@@ -1684,14 +1696,7 @@ def _valid_sources_for_operation(
         ):
             continue
 
-        if valid_generation(
-            meta,
-            X,
-            info,
-            source_idx,
-            params=params,
-        ):
-            valid_sources.append(source_idx)
+        valid_sources.append(source_idx)
 
     return valid_sources
 
@@ -1787,16 +1792,56 @@ def _rollback_appended_genes(
     del X.genes[x_len:]
 
 
+def _value_contains_empty_array(value: Any) -> bool:
+    """Return whether a generated value contains any zero-size ndarray.
+
+    Numeric ndarrays are checked in O(1) from their shape/size metadata.
+    Recursion is only needed for object arrays and Python containers.
+    """
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return True
+        if value.dtype != object:
+            return False
+        return any(
+            _value_contains_empty_array(item)
+            for item in value.flat
+        )
+
+    if isinstance(value, (list, tuple)):
+        return any(
+            _value_contains_empty_array(item)
+            for item in value
+        )
+
+    if isinstance(value, dict):
+        return any(
+            _value_contains_empty_array(item)
+            for item in value.values()
+        )
+
+    return False
+
+
 def _generated_outputs_are_novel(
     X: ProgramX,
     new_indices: list[int],
     *,
     existing_count: int,
 ) -> tuple[bool, str | None]:
-    """Require every output gene to be novel versus all retained gene data."""
+    """Require every output gene to be non-empty and novel."""
     accepted_new: list[int] = []
 
     for gidx in new_indices:
+        if any(
+            _value_contains_empty_array(value)
+            for value in X[gidx]
+        ):
+            return (
+                False,
+                f"generated gene {gidx} contains an empty array",
+            )
+
         duplicate_idx = equivalent_gene_idx(
             X,
             X[gidx],
@@ -1886,7 +1931,7 @@ def _stochastic_failure_message(
     return (
         f"{side} generation terminated after {consecutive_failures} "
         "consecutive rejected stochastic attempts; legal sampled "
-        "transformations produced non-novel gene data."
+        "transformations produced duplicate or empty gene data."
     )
 
 
