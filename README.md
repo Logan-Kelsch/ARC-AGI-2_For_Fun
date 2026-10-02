@@ -525,3 +525,38 @@ a*x + b
 Only zero-residual relationships across every training sample are accepted.
 Successful matches update ST with the supporting GP gene, symbolic rule, and
 fitted parameters.
+
+
+### Exact 2D one-gene solver
+
+~~~python
+solutions_2d = solve_2dim_1gene_basic(
+    GP_pool_2d,
+    ST_frontier_2d,
+    GP_X=GP_X,
+    SP_X=SP_X,
+    ST=ST,
+)
+~~~
+
+The solver searches exact reconstructive rules in increasing complexity:
+
+~~~text
+0  Y = X
+1  zero-background structural embed
+2  zero-background fixed embed(row, col)
+3  structural crop
+4  fixed crop(row, col)
+5  zero-fill shift(dr, dc)
+6  integer tile(rows, cols)
+~~~
+
+Structural positions are top-left, top-right, bottom-left, bottom-right, and
+unambiguous center.
+
+Every accepted rule must reconstruct the complete SP target exactly across every
+training sample. Mere containment does not solve a target.
+
+Arbitrary fixed coordinates and shifts require at least two training samples.
+Successful matches immediately populate ST gp_gidx, solution_rule, and
+solution_params.
