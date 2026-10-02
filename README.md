@@ -365,6 +365,64 @@ concrete genes on that side:
 3+     color ID / presence pairs
 ~~~
 
+### Select-residual color layering
+
+When each training input and output have aligned spatial shape, SP also creates an input-relative select-residual representation by default.
+
+For one input color x with observed output destinations:
+
+~~~text
+x -> {y1, y2, ..., yn}
+~~~
+
+SP creates one shared Boolean support for every non-empty destination subset A:
+
+~~~text
+U[x,A] = (input == x) AND (output in A)
+~~~
+
+ST then treats alternative base-layer choices as OR branches. For example:
+
+~~~text
+Layer[x,{0,1,2}]
+
+OR
+    select 0
+    AND U[x,{0,1,2}]
+    AND Layer[x,{1,2}]
+
+OR
+    select 1
+    AND U[x,{0,1,2}]
+    AND Layer[x,{0,2}]
+
+OR
+    select 2
+    AND U[x,{0,1,2}]
+    AND Layer[x,{0,1}]
+~~~
+
+This recursively carries smaller residual supports until a singleton destination remains.
+
+The data expansion is a shared subset DAG rather than duplicated paint permutations, so n destinations require at most:
+
+~~~text
+2^n - 1
+~~~
+
+support masks for that source color.
+
+The default initialization ceiling is 5 destinations per source color:
+
+~~~python
+init_env(
+    task.train,
+    select_residual_max_destinations=5,
+)
+~~~
+
+If input/output shapes do not align, or a source color exceeds the configured ceiling, this root alternative is skipped and the ordinary absolute composite proof remains available.
+
 ---
 
 ## Random symbolic growth
