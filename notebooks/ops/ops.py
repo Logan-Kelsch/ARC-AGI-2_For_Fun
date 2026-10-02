@@ -1629,29 +1629,20 @@ def _eligible_operation_infos(
         else {str(name) for name in operation_names}
     )
 
-    infos = [
+    return [
         info
         for info in OP_REGISTRY.values()
         if info.func is not None
         and (allowed_names is None or info.name in allowed_names)
         and (side != "SP" or info.partition != "null")
     ]
-    return infos
-
-
-def _candidate_signature(
-    info: OperationInfo,
-    source_idx: Any,
-    params: dict[str, Any] | None,
-):
-    return _transition_signature(info, source_idx, params)
 
 
 def _source_candidates(
     info: OperationInfo,
     gene_count: int,
 ) -> list[Any]:
-    """Enumerate legal source-index tuples for one operation arity."""
+    """Enumerate source-index tuples for one operation arity."""
     if info.source_count == 1:
         return list(range(gene_count))
 
@@ -1669,110 +1660,18 @@ def _source_candidates(
     ]
 
 
-def _parameterless_valid_candidates(
+def _valid_sources_for_operation(
     meta: ProgramMeta,
     X: ProgramX,
+    info: OperationInfo,
     *,
+    params: dict[str, Any],
     max_output_count: int | None = None,
-    operation_names: Iterable[str] | None = None,
-    excluded_signatures: set[Any] | None = None,
-) -> list[tuple[OperationInfo, Any, dict[str, Any]]]:
-    """Enumerate the complete finite candidate space for parameterless ops."""
-    excluded_signatures = excluded_signatures or set()
-    infos = _eligible_operation_infos(
-        side=meta.side,
-        max_output_count=max_output_count,
-        operation_names=operation_names,
-    )
+) -> list[Any]:
+    """Return every currently legal source/source-tuple for one operation."""
+    valid_sources: list[Any] = []
 
-    candidates = []
-
-    for info in infos:
-        if info.parameter_sampler is not None:
-            continue
-
-        for source_idx in _source_candidates(info, len(X)):
-            params: dict[str, Any] = {}
-            signature = _candidate_signature(info, source_idx, params)
-
-            if signature in excluded_signatures:
-                continue
-
-            if (
-                max_output_count is not None
-                and operation_output_count(
-                    info,
-                    meta,
-                    X,
-                    source_idx,
-                    params=params,
-                ) > max_output_count
-            ):
-                continue
-
-            if valid_generation(
-                meta,
-                X,
-                info,
-                source_idx,
-                params=params,
-            ):
-                candidates.append((info, source_idx, params))
-
-    return candidates
-
-
-def _has_parameterized_ops(
-    *,
-    side: str,
-    max_output_count: int | None,
-    operation_names: Iterable[str] | None,
-) -> bool:
-    return any(
-        info.parameter_sampler is not None
-        for info in _eligible_operation_infos(
-            side=side,
-            max_output_count=max_output_count,
-            operation_names=operation_names,
-        )
-    )
-
-
-def _random_parameterized_candidate(
-    meta: ProgramMeta,
-    X: ProgramX,
-    *,
-    rng: np.random.Generator,
-    max_output_count: int | None,
-    max_attempts: int,
-    operation_names: Iterable[str] | None,
-    excluded_signatures: set[Any],
-) -> tuple[OperationInfo, Any, dict[str, Any]] | None:
-    infos = [
-        info
-        for info in _eligible_operation_infos(
-            side=meta.side,
-            max_output_count=max_output_count,
-            operation_names=operation_names,
-        )
-        if info.parameter_sampler is not None
-    ]
-
-    if not infos:
-        return None
-
-    for _ in range(max_attempts):
-        info = infos[int(rng.integers(len(infos)))]
-        source_space = _source_candidates(info, len(X))
-        if not source_space:
-            continue
-        source_idx = source_space[int(rng.integers(len(source_space)))]
-        params = sample_operation_params(info, rng)
-        signature = _candidate_signature(info, source_idx, params)
-
-        if signature in excluded_signatures:
-            continue
-
+    for source_idx in _source_candidates(info, len(X)):
         if (
             max_output_count is not None
             and operation_output_count(
@@ -1792,9 +1691,64 @@ def _random_parameterized_candidate(
             source_idx,
             params=params,
         ):
-            return info, source_idx, params
+            valid_sources.append(source_idx)
 
-    return None
+    return valid_sources
+
+
+def _sample_uniform_legal_candidate(
+    meta: ProgramMeta,
+    X: ProgramX,
+    *,
+    rng: np.random.Generator,
+    max_output_count: int | None = None,
+    operation_names: Iterable[str] | None = None,
+) -> tuple[OperationInfo, Any, dict[str, Any]] | None:
+    """Sample operation first, then source, each uniformly.
+
+    Every legal operation receives exactly one slot in the first-stage draw,
+    regardless of how many valid source genes it can consume.  After one
+    operation is selected, its legal source/source-tuples are sampled uniformly.
+
+    All current built-in operations are parameterless.  For future
+    parameterized operations, one parameter realization is sampled while
+    constructing the current legal operation state; the operation is retained
+    only when that realization has at least one legal source.
+    """
+    legal_operations: list[
+        tuple[OperationInfo, dict[str, Any], list[Any]]
+    ] = []
+
+    for info in _eligible_operation_infos(
+        side=meta.side,
+        max_output_count=max_output_count,
+        operation_names=operation_names,
+    ):
+        params = sample_operation_params(info, rng)
+        valid_sources = _valid_sources_for_operation(
+            meta,
+            X,
+            info,
+            params=params,
+            max_output_count=max_output_count,
+        )
+
+        if valid_sources:
+            legal_operations.append(
+                (info, params, valid_sources)
+            )
+
+    if not legal_operations:
+        return None
+
+    info, params, valid_sources = legal_operations[
+        int(rng.integers(len(legal_operations)))
+    ]
+    source_idx = valid_sources[
+        int(rng.integers(len(valid_sources)))
+    ]
+
+    return info, source_idx, params
 
 
 def _flatten_generated_indices(result: Any) -> list[int]:
@@ -1932,23 +1886,49 @@ def _generation_exhausted_message(side: str) -> str:
     )
 
 
+def _stochastic_failure_message(
+    side: str,
+    consecutive_failures: int,
+) -> str:
+    return (
+        f"{side} generation terminated after {consecutive_failures} "
+        "consecutive rejected stochastic attempts; legal sampled "
+        "transformations produced non-novel gene data."
+    )
+
+
+def _no_legal_candidate_message(side: str) -> str:
+    return (
+        f"{side} generation terminated: no legal operation/source "
+        "candidates remain."
+    )
+
+
 def GP_generate(
     GP_meta: ProgramMeta,
     GP_X: ProgramX,
     n_new_genes: int,
     *,
     rng: np.random.Generator | int | None = None,
-    max_attempts_per_generation: int = 500,
+    max_attempts_per_generation: int = 100,
     operation_names: Iterable[str] | None = None,
 ) -> list[int]:
-    """Generate novel GP genes while avoiding transition and data duplicates.
+    """Generate novel GP genes with hierarchical uniform stochastic sampling.
 
-    For parameterless operations, every currently legal operation/source pair
-    is explored at most once per call. Candidates whose instantiated outputs
-    duplicate any retained gene are rolled back.
+    Each attempt follows:
 
-    If all finite legal candidates have been explored without producing another
-    novel gene, generation terminates early with an explicit message.
+        1. uniformly sample one currently legal operation;
+        2. uniformly sample one currently legal source/source-tuple for it;
+        3. execute the transformation transactionally;
+        4. retain it only when every emitted gene is novel.
+
+    A rejected novelty check is thrown away completely.  The next attempt
+    restarts from the same uniform operation/source priors rather than removing
+    the rejected transition from future sampling.
+
+    The consecutive rejection counter resets after every accepted generation.
+    Generation terminates after max_attempts_per_generation consecutive
+    non-novel attempts.
     """
     _validate_program_pair(GP_meta, GP_X)
 
@@ -1956,102 +1936,65 @@ def GP_generate(
         raise ValueError("GP_generate requires GP-side meta/X.")
     if isinstance(n_new_genes, bool) or int(n_new_genes) < 0:
         raise ValueError("n_new_genes must be a non-negative integer.")
+    if (
+        isinstance(max_attempts_per_generation, bool)
+        or int(max_attempts_per_generation) < 1
+    ):
+        raise ValueError(
+            "max_attempts_per_generation must be a positive integer."
+        )
 
     n_new_genes = int(n_new_genes)
+    max_attempts_per_generation = int(
+        max_attempts_per_generation
+    )
     rng = _rng(rng)
     generated: list[int] = []
-    rejected_signatures: set[Any] = set()
-    parameterized_duplicate_rejections = 0
+    consecutive_failures = 0
 
     while len(generated) < n_new_genes:
         remaining = n_new_genes - len(generated)
-        accepted = False
 
-        candidates = _parameterless_valid_candidates(
+        candidate = _sample_uniform_legal_candidate(
             GP_meta,
             GP_X,
-            max_output_count=remaining,
-            operation_names=operation_names,
-            excluded_signatures=rejected_signatures,
-        )
-        rng.shuffle(candidates)
-
-        for info, source_idx, params in candidates:
-            signature = _candidate_signature(info, source_idx, params)
-            rejected_signatures.add(signature)
-
-            new_indices, _ = _try_candidate_transactionally(
-                GP_meta,
-                GP_X,
-                info,
-                source_idx,
-                params,
-            )
-
-            if new_indices:
-                generated.extend(new_indices)
-                accepted = True
-                break
-
-        if accepted:
-            continue
-
-        parameterized = _has_parameterized_ops(
-            side="GP",
+            rng=rng,
             max_output_count=remaining,
             operation_names=operation_names,
         )
 
-        if parameterized:
-            candidate = _random_parameterized_candidate(
-                GP_meta,
-                GP_X,
-                rng=rng,
-                max_output_count=remaining,
-                max_attempts=max_attempts_per_generation,
-                operation_names=operation_names,
-                excluded_signatures=rejected_signatures,
-            )
-
-            if candidate is not None:
-                info, source_idx, params = candidate
-                signature = _candidate_signature(info, source_idx, params)
-                rejected_signatures.add(signature)
-
-                new_indices, _ = _try_candidate_transactionally(
-                    GP_meta,
-                    GP_X,
-                    info,
-                    source_idx,
-                    params,
-                )
-
-                if new_indices:
-                    generated.extend(new_indices)
-                    parameterized_duplicate_rejections = 0
-                    continue
-
-                parameterized_duplicate_rejections += 1
-                if (
-                    parameterized_duplicate_rejections
-                    >= max_attempts_per_generation
-                ):
-                    print(
-                        "GP generation terminated: no novel gene was found "
-                        "within the sampled parameterized generation space."
-                    )
-                    break
-
-                continue
-
-            print(
-                "GP generation terminated: no novel gene was found within the "
-                "sampled parameterized generation space."
-            )
+        if candidate is None:
+            print(_no_legal_candidate_message("GP"))
             break
 
-        print(_generation_exhausted_message("GP"))
-        break
+        info, source_idx, params = candidate
+
+        new_indices, _ = _try_candidate_transactionally(
+            GP_meta,
+            GP_X,
+            info,
+            source_idx,
+            params,
+        )
+
+        if new_indices:
+            generated.extend(new_indices)
+            consecutive_failures = 0
+            continue
+
+        consecutive_failures += 1
+
+        if (
+            consecutive_failures
+            >= max_attempts_per_generation
+        ):
+            print(
+                _stochastic_failure_message(
+                    "GP",
+                    consecutive_failures,
+                )
+            )
+            break
 
     return generated
 
@@ -2062,35 +2005,43 @@ def SP_generate(
     ST: SolutionTree | None = None,
     *,
     rng: np.random.Generator | int | None = None,
-    max_attempts: int = 500,
+    max_attempts: int = 100,
     operation_names: Iterable[str] | None = None,
 ) -> list[int]:
-    """Generate one novel SP operation application.
+    """Generate one novel SP operation with uniform operation/source priors.
 
-    Legal parameterless SP candidates are exhaustively explored until one
-    produces entirely novel output genes. Duplicate-data candidates are rolled
-    back. If none remain, the function prints that the legal generation space
-    has been exhausted and returns [].
+    Each stochastic attempt uniformly selects a legal reversible operation,
+    then uniformly selects one legal source/source-tuple for that operation.
+    Duplicate generated data is rolled back and the next attempt restarts from
+    the same uniform priors.
+
+    Generation terminates after max_attempts consecutive non-novel attempts.
     """
     _validate_program_pair(SP_meta, SP_X)
 
     if SP_meta.side != "SP":
         raise ValueError("SP_generate requires SP-side meta/X.")
+    if isinstance(max_attempts, bool) or int(max_attempts) < 1:
+        raise ValueError("max_attempts must be a positive integer.")
 
+    max_attempts = int(max_attempts)
     rng = _rng(rng)
-    rejected_signatures: set[Any] = set()
+    consecutive_failures = 0
 
-    candidates = _parameterless_valid_candidates(
-        SP_meta,
-        SP_X,
-        operation_names=operation_names,
-        excluded_signatures=rejected_signatures,
-    )
-    rng.shuffle(candidates)
+    while consecutive_failures < max_attempts:
+        candidate = _sample_uniform_legal_candidate(
+            SP_meta,
+            SP_X,
+            rng=rng,
+            max_output_count=None,
+            operation_names=operation_names,
+        )
 
-    for info, source_idx, params in candidates:
-        signature = _candidate_signature(info, source_idx, params)
-        rejected_signatures.add(signature)
+        if candidate is None:
+            print(_no_legal_candidate_message("SP"))
+            return []
+
+        info, source_idx, params = candidate
 
         new_indices, _ = _try_candidate_transactionally(
             SP_meta,
@@ -2101,6 +2052,7 @@ def SP_generate(
         )
 
         if not new_indices:
+            consecutive_failures += 1
             continue
 
         if ST is not None:
@@ -2115,57 +2067,14 @@ def SP_generate(
 
         return new_indices
 
-    if _has_parameterized_ops(
-        side="SP",
-        max_output_count=None,
-        operation_names=operation_names,
-    ):
-        for _ in range(max_attempts):
-            candidate = _random_parameterized_candidate(
-                SP_meta,
-                SP_X,
-                rng=rng,
-                max_output_count=None,
-                max_attempts=1,
-                operation_names=operation_names,
-                excluded_signatures=rejected_signatures,
-            )
-
-            if candidate is None:
-                continue
-
-            info, source_idx, params = candidate
-            signature = _candidate_signature(info, source_idx, params)
-            rejected_signatures.add(signature)
-
-            new_indices, _ = _try_candidate_transactionally(
-                SP_meta,
-                SP_X,
-                info,
-                source_idx,
-                params,
-            )
-
-            if not new_indices:
-                continue
-
-            if ST is not None:
-                ST.register_generation(
-                    SP_meta,
-                    source_gidx=int(source_idx),
-                    generated_gidxs=new_indices,
-                    partition=info.partition,
-                    inverse_op=info.inverse_op,
-                    op_name=info.name,
-                )
-
-            return new_indices
-
-        print(
-            "SP generation terminated: no novel gene was found within the "
-            "sampled parameterized generation space."
+    print(
+        _stochastic_failure_message(
+            "SP",
+            consecutive_failures,
         )
-        return []
+    )
+    return []
+
 
     print(_generation_exhausted_message("SP"))
     return []
