@@ -1116,6 +1116,174 @@ def partition_composite(
     return tuple(generated)
 
 
+@dataclass(frozen=True)
+class SelectResidualPartition:
+    """Concrete SP support masks for one select-residual subset DAG."""
+
+    source_destinations: dict[int, tuple[int, ...]]
+    support_gidxs: dict[tuple[int, tuple[int, ...]], int]
+
+
+def partition_select_residual(
+    meta: ProgramMeta,
+    X: ProgramX,
+    input_grids: Iterable[Any],
+    source_idx: int = 0,
+    *,
+    max_destinations: int = 5,
+) -> SelectResidualPartition | None:
+    """Create input-relative residual-support masks for SP initialization.
+
+    For each input color x, collect every output color reachable at aligned
+    pixels across the training set:
+
+        x -> {y1, ..., yn}
+
+    Then materialize one shared boolean support gene for every non-empty
+    destination subset A:
+
+        U[x,A] = (input == x) AND (output in A)
+
+    These supports are later connected by SolutionTree as a recursive
+    select-residual DAG.  The full destination subset is simply the source
+    color support; progressively smaller subsets are carried residual masks.
+
+    This is intentionally an SP initialization helper rather than a normal
+    registered operation because its semantics depend jointly on the known
+    training input and output.
+
+    Returns None when pixelwise transition geometry is unavailable (input and
+    output shapes differ for any sample) or when one source color exceeds the
+    configured subset-expansion ceiling.
+    """
+    if meta.side != "SP" or X.side != "SP":
+        raise ValueError(
+            "partition_select_residual is an SP-only initialization partition."
+        )
+
+    if isinstance(max_destinations, bool) or int(max_destinations) < 1:
+        raise ValueError("max_destinations must be >= 1.")
+
+    source_idx = _validate_source(meta, X, source_idx)
+    input_grids = [np.asarray(value) for value in input_grids]
+
+    if len(input_grids) != X.sample_count:
+        raise ValueError(
+            "partition_select_residual requires one input grid per SP sample."
+        )
+
+    output_grids = [
+        np.asarray(value)
+        for value in X[source_idx]
+    ]
+
+    if any(
+        input_grid.ndim != 2
+        or output_grid.ndim != 2
+        or input_grid.shape != output_grid.shape
+        for input_grid, output_grid in zip(input_grids, output_grids)
+    ):
+        return None
+
+    source_colors = sorted(
+        {
+            int(color)
+            for grid in input_grids
+            for color in np.unique(grid)
+        }
+    )
+
+    source_destinations: dict[int, tuple[int, ...]] = {}
+
+    for source_color in source_colors:
+        destinations: set[int] = set()
+
+        for input_grid, output_grid in zip(
+            input_grids,
+            output_grids,
+        ):
+            source_mask = input_grid == source_color
+
+            if np.any(source_mask):
+                destinations.update(
+                    int(value)
+                    for value in np.unique(
+                        output_grid[source_mask]
+                    )
+                )
+
+        if not destinations:
+            continue
+
+        ordered = tuple(sorted(destinations))
+
+        if len(ordered) > int(max_destinations):
+            return None
+
+        source_destinations[source_color] = ordered
+
+    if not source_destinations:
+        return None
+
+    support_gidxs: dict[
+        tuple[int, tuple[int, ...]],
+        int,
+    ] = {}
+
+    for source_color, destinations in source_destinations.items():
+        for subset_size in range(1, len(destinations) + 1):
+            for subset in itertools.combinations(
+                destinations,
+                subset_size,
+            ):
+                subset = tuple(int(value) for value in subset)
+                subset_values = np.asarray(
+                    subset,
+                    dtype=np.int64,
+                )
+
+                values = [
+                    np.logical_and(
+                        input_grid == source_color,
+                        np.isin(
+                            output_grid,
+                            subset_values,
+                        ),
+                    )
+                    for input_grid, output_grid in zip(
+                        input_grids,
+                        output_grids,
+                    )
+                ]
+
+                gidx = X.append_gene(values)
+                dims = _gene_ndim(X[gidx])
+                meta_gidx = meta.append(
+                    source=source_idx,
+                    op="partition_select_residual",
+                    dims=dims,
+                    params={
+                        "source_color": int(source_color),
+                        "destinations": subset,
+                    },
+                )
+
+                if meta_gidx != gidx:
+                    raise RuntimeError(
+                        "SP metadata/data indices diverged while creating "
+                        "select-residual supports."
+                    )
+
+                support_gidxs[
+                    (int(source_color), subset)
+                ] = gidx
+
+    return SelectResidualPartition(
+        source_destinations=source_destinations,
+        support_gidxs=support_gidxs,
+    )
+
+
 
 @operation(
     partition="null",

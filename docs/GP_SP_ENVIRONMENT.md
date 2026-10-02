@@ -361,6 +361,77 @@ AND ...
 
 Known inverse operations are innate grammar knowledge and do not need to be discovered by GP.
 
+## Select-residual initialization
+
+When every training input/output pair has the same shape, init_env also builds an input-relative select-residual SP representation.
+
+For one source color x with destination set A:
+
+~~~text
+x -> A
+~~~
+
+the concrete support target is:
+
+~~~text
+U[x,A] = (input == x) AND (output in A)
+~~~
+
+SP materializes every non-empty subset support once. ST then creates logical Layer[x,A] nodes whose OR branches choose one destination as the current base paint and recursively carry the remaining destination subset.
+
+For example:
+
+~~~text
+Layer[x,{0,1,2}]
+
+OR
+    select 0
+    AND U[x,{0,1,2}]
+    AND Layer[x,{1,2}]
+
+OR
+    select 1
+    AND U[x,{0,1,2}]
+    AND Layer[x,{0,2}]
+
+OR
+    select 2
+    AND U[x,{0,1,2}]
+    AND Layer[x,{0,1}]
+~~~
+
+A singleton layer is reconstructed directly from its destination color and carried support.
+
+This lets the solver explain a categorical partition through nested residual supports rather than requiring every direct x->y mask independently.
+
+The subset supports are shared across all branches. Therefore n destinations create at most:
+
+~~~text
+2^n - 1
+~~~
+
+concrete support genes for that source color, rather than n! duplicated ordering paths.
+
+The default expansion ceiling is:
+
+~~~python
+select_residual_max_destinations=5
+~~~
+
+and can be changed through init_env.
+
+The complete select-residual reconstruction uses:
+
+~~~text
+inv_select_residual_leaf
+inv_select_residual_step
+inv_partition_select_residual
+~~~
+
+The inverse layer geometry enforces nested-support containment and exact final output coverage.
+
+The select-residual route is attached to the root as a sibling OR alternative to the existing shape/composite representation.
+
 init_env also binds GP_meta, GP_X, and SP_X to ST so a solved proof can later be distilled by Kelschinator.fit(ST).
 
 ---

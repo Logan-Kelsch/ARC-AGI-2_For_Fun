@@ -178,6 +178,149 @@ def inv_partition_composite(
     return result
 
 
+_SELECT_RESIDUAL_EMPTY = np.int64(-1)
+
+
+@inverse_operation("partition_select_residual")
+def inv_select_residual_leaf(
+    color: Any,
+    support: Any,
+) -> np.ndarray:
+    """Paint one singleton destination inside its carried support."""
+    color_array = np.asarray(color)
+
+    if color_array.ndim != 0:
+        raise ValueError(
+            "Select-residual destination color must be scalar."
+        )
+
+    support = np.asarray(support, dtype=bool)
+
+    if support.ndim != 2:
+        raise ValueError(
+            "Select-residual support must be a 2D boolean mask."
+        )
+
+    result = np.full(
+        support.shape,
+        _SELECT_RESIDUAL_EMPTY,
+        dtype=np.int64,
+    )
+    result[support] = np.int64(color_array.item())
+    return result
+
+
+@inverse_operation("partition_select_residual")
+def inv_select_residual_step(
+    color: Any,
+    support: Any,
+    residual_layer: Any,
+) -> np.ndarray:
+    """Paint a selected base color, then overlay the nested residual layer."""
+    color_array = np.asarray(color)
+
+    if color_array.ndim != 0:
+        raise ValueError(
+            "Select-residual destination color must be scalar."
+        )
+
+    support = np.asarray(support, dtype=bool)
+    residual_layer = np.asarray(
+        residual_layer,
+        dtype=np.int64,
+    )
+
+    if support.ndim != 2 or residual_layer.ndim != 2:
+        raise ValueError(
+            "Select-residual step requires 2D support/layer data."
+        )
+
+    if support.shape != residual_layer.shape:
+        raise ValueError(
+            "Select-residual support and residual layer shapes must match."
+        )
+
+    residual_support = (
+        residual_layer != _SELECT_RESIDUAL_EMPTY
+    )
+
+    if np.any(residual_support & ~support):
+        raise ValueError(
+            "Nested select-residual support must be contained "
+            "inside its parent support."
+        )
+
+    result = np.full(
+        support.shape,
+        _SELECT_RESIDUAL_EMPTY,
+        dtype=np.int64,
+    )
+    result[support] = np.int64(color_array.item())
+    result[residual_support] = residual_layer[
+        residual_support
+    ]
+
+    return result
+
+
+@inverse_operation("partition_select_residual")
+def inv_partition_select_residual(
+    *source_layers: Any,
+) -> np.ndarray:
+    """Combine one reconstructed select-residual layer per input color.
+
+    Each layer uses -1 outside its source-color support.  Source-color supports
+    must be disjoint and collectively cover the complete output grid.
+    """
+    if len(source_layers) == 1 and isinstance(
+        source_layers[0],
+        (list, tuple),
+    ):
+        source_layers = tuple(source_layers[0])
+
+    if not source_layers:
+        raise ValueError(
+            "Select-residual output reconstruction requires at least one layer."
+        )
+
+    layers = [
+        np.asarray(layer, dtype=np.int64)
+        for layer in source_layers
+    ]
+
+    if any(layer.ndim != 2 for layer in layers):
+        raise ValueError(
+            "Select-residual source layers must be 2D."
+        )
+
+    shape = layers[0].shape
+
+    if any(layer.shape != shape for layer in layers):
+        raise ValueError(
+            "All select-residual source layers must share one shape."
+        )
+
+    coverage = np.zeros(shape, dtype=np.int64)
+
+    for layer in layers:
+        coverage += (
+            layer != _SELECT_RESIDUAL_EMPTY
+        ).astype(np.int64)
+
+    if not np.all(coverage == 1):
+        raise ValueError(
+            "Select-residual source layers must cover every cell exactly once."
+        )
+
+    result = np.zeros(shape, dtype=np.int64)
+
+    for layer in layers:
+        active = layer != _SELECT_RESIDUAL_EMPTY
+        result[active] = layer[active]
+
+    return result
+
+
 @inverse_operation("bool_complement")
 def inv_bool_complement(value: Any) -> np.ndarray:
     """Boolean complement is self-inverse."""
