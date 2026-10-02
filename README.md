@@ -246,6 +246,7 @@ Examples:
 
 ~~~text
 bool_sum
+bool_mat_ident
 bool_cavity
 bool2_union
 bool2_intersect
@@ -861,6 +862,7 @@ bool_complement
 bool2_union
 bool2_intersect
 bool_sum
+bool_mat_ident
 bool_cavity
 
 mat2_cwrotate

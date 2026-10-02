@@ -1285,6 +1285,74 @@ def partition_select_residual(
 
 
 
+def _bool_mat_identity_ids(
+    X: ProgramX,
+    source_idx: int,
+) -> list[np.int64]:
+    """Assign deterministic first-seen IDs to exact 2D Boolean patterns."""
+    pattern_ids: dict[tuple[tuple[int, ...], bytes], np.int64] = {}
+    ids: list[np.int64] = []
+
+    for value in X[source_idx]:
+        array = np.asarray(value, dtype=bool)
+        key = (
+            tuple(int(size) for size in array.shape),
+            array.tobytes(),
+        )
+
+        if key not in pattern_ids:
+            pattern_ids[key] = np.int64(len(pattern_ids))
+
+        ids.append(pattern_ids[key])
+
+    return ids
+
+
+def _bool_mat_ident_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    """Accept only non-trivial, non-unique pattern partitions."""
+    source = _source_tuple(source_idx)[0]
+    ids = _bool_mat_identity_ids(X, source)
+    identity_count = len({int(value) for value in ids})
+
+    return 1 < identity_count < X.sample_count
+
+
+@operation(
+    partition="null",
+    inverse_op="inv_bool_mat_ident",
+    output_count=1,
+    allowed_dims=(2,),
+    atomic_dtypes=(np.bool_,),
+    validator=_bool_mat_ident_validator,
+)
+def bool_mat_ident(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> int:
+    """Map equal 2D Boolean matrices across samples to the same scalar ID.
+
+    IDs are assigned in first-seen order across the training samples. The
+    operation is legal only when the resulting grouping is a proper partial
+    partition: more than one identity class, but fewer classes than samples.
+    """
+    source_idx = _validate_source(meta, X, source_idx)
+    values = _bool_mat_identity_ids(X, source_idx)
+
+    return _append_gene(
+        meta,
+        X,
+        values,
+        source=source_idx,
+        op_name="bool_mat_ident",
+    )
+
+
 @operation(
     partition="null",
     inverse_op="inv_bool_sum",

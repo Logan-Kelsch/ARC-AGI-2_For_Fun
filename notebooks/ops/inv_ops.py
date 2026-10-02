@@ -455,6 +455,35 @@ def _axis_adjacent_cavity_mask(array: np.ndarray) -> np.ndarray:
 # has an explicit reverse/checking companion.
 
 
+@inverse_operation("bool_mat_ident", reconstructive=False)
+def inv_bool_mat_ident(
+    identifier: Any,
+    source: Any,
+):
+    """Validate one sample of the non-reconstructive matrix-identity relation.
+
+    Cross-sample class consistency is enforced by bool_mat_ident's forward
+    validator. This NULL inverse only validates the local value types and
+    returns the original source.
+    """
+    identifier_array = np.asarray(identifier)
+    source_array = np.asarray(source)
+
+    if identifier_array.ndim != 0 or not np.issubdtype(
+        identifier_array.dtype,
+        np.integer,
+    ):
+        raise ValueError("bool_mat_ident identifier must be an integer scalar.")
+
+    if int(identifier_array.item()) < 0:
+        raise ValueError("bool_mat_ident identifier must be non-negative.")
+
+    if source_array.ndim != 2 or source_array.dtype != np.bool_:
+        raise ValueError("bool_mat_ident source must be a 2D Boolean matrix.")
+
+    return _copy(source)
+
+
 @inverse_operation("bool_sum", reconstructive=False)
 def inv_bool_sum(
     count: Any,
