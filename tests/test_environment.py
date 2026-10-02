@@ -27,6 +27,7 @@ from notebooks.ops.ops import (
     bool2_union,
     bool_cavity,
     bool_complement,
+    bool_mat_ident,
     bool_sum,
     dim0_flip,
     dim1_flip,
@@ -2008,6 +2009,7 @@ def test_operation_partition_categories():
     assert OP_REGISTRY["bool2_union"].partition == "null"
     assert OP_REGISTRY["bool2_intersect"].partition == "null"
     assert OP_REGISTRY["bool_sum"].partition == "null"
+    assert OP_REGISTRY["bool_mat_ident"].partition == "null"
     assert OP_REGISTRY["bool_cavity"].partition == "null"
 
 
@@ -2037,6 +2039,126 @@ def test_gp_generate_can_discover_binary_boolean_operation():
     assert meta.op[created[0]] == "bool2_union"
     assert meta.source[created[0]] == (first, second)
 
+
+
+def test_bool_mat_ident_groups_matching_2d_boolean_patterns():
+    pattern_a = np.array(
+        [
+            [True, False],
+            [False, True],
+        ],
+        dtype=bool,
+    )
+    pattern_b = np.array(
+        [
+            [True, True],
+            [False, False],
+        ],
+        dtype=bool,
+    )
+    pattern_c = np.array(
+        [
+            [False, True],
+            [True, False],
+        ],
+        dtype=bool,
+    )
+
+    meta, X = _raw_program(
+        "GP",
+        [
+            pattern_a,
+            pattern_a.copy(),
+            pattern_b,
+            pattern_c,
+            pattern_b.copy(),
+        ],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, bool_mat_ident, 0)
+
+    gidx = bool_mat_ident(meta, X, 0)
+
+    assert meta.source[gidx] == 0
+    assert meta.op[gidx] == "bool_mat_ident"
+    assert meta.dims[gidx] == 0
+    assert [int(value) for value in X[gidx]] == [0, 0, 1, 2, 1]
+    assert all(isinstance(value, np.int64) for value in X[gidx])
+
+
+def test_bool_mat_ident_rejects_uniform_and_all_unique_identity_sets():
+    pattern_a = np.array([[True, False]], dtype=bool)
+    pattern_b = np.array([[False, True]], dtype=bool)
+    pattern_c = np.array([[True, True]], dtype=bool)
+
+    uniform_meta, uniform_X = _raw_program(
+        "GP",
+        [
+            pattern_a,
+            pattern_a.copy(),
+            pattern_a.copy(),
+        ],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        uniform_meta,
+        uniform_X,
+        bool_mat_ident,
+        0,
+    )
+
+    unique_meta, unique_X = _raw_program(
+        "GP",
+        [pattern_a, pattern_b, pattern_c],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        unique_meta,
+        unique_X,
+        bool_mat_ident,
+        0,
+    )
+
+
+def test_bool_mat_ident_requires_2d_boolean_source_and_is_gp_only():
+    int_meta, int_X = _raw_program(
+        "GP",
+        [
+            np.array([[0, 1]], dtype=np.int64),
+            np.array([[0, 1]], dtype=np.int64),
+            np.array([[1, 0]], dtype=np.int64),
+        ],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(int_meta, int_X, bool_mat_ident, 0)
+
+    one_dim_meta, one_dim_X = _raw_program(
+        "GP",
+        [
+            np.array([True, False], dtype=bool),
+            np.array([True, False], dtype=bool),
+            np.array([False, True], dtype=bool),
+        ],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        one_dim_meta,
+        one_dim_X,
+        bool_mat_ident,
+        0,
+    )
+
+    sp_meta, sp_X = _raw_program(
+        "SP",
+        [
+            np.array([[True, False]], dtype=bool),
+            np.array([[True, False]], dtype=bool),
+            np.array([[False, True]], dtype=bool),
+        ],
+        raw_op="raw_output",
+    )
+    assert not valid_generation(sp_meta, sp_X, bool_mat_ident, 0)
 
 
 def test_bool_sum_counts_true_values_and_returns_scalar_int64():
