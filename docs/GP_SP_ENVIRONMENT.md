@@ -1289,3 +1289,74 @@ solutions = solve_0dim_1gene_basic(
     ST=ST,
 )
 ~~~
+
+
+## Exact 2D one-gene spatial solver
+
+~~~python
+solutions_2d = solve_2dim_1gene_basic(
+    GP_pool_2d,
+    ST_frontier_2d,
+    GP_X=GP_X,
+    SP_X=SP_X,
+    ST=ST,
+)
+~~~
+
+This is the 2D analogue of solve_0dim_1gene_basic. It is an exact symbolic
+matcher rather than a statistical image model.
+
+The ordered rule hierarchy is:
+
+~~~text
+0  identity
+   Y = X
+
+1  structural zero-background embedding
+   top_left
+   top_right
+   bottom_left
+   bottom_right
+   center
+
+2  fixed zero-background embedding
+   embed X at the same (row, col) in every sample
+
+3  structural crop
+   crop from a named structural position
+
+4  fixed crop
+   crop from the same (row, col) in every sample
+
+5  zero-fill translation
+   shift X by fixed (dr, dc) on the same-size canvas
+
+6  integer tiling
+   tile X by fixed (rows, cols)
+~~~
+
+"Zero background" means False for boolean matrices and numeric zero for numeric
+matrices, represented in the target dtype.
+
+Containment alone is never accepted. For an embedding rule, every cell outside
+the embedded GP matrix must equal the zero background so the full SP matrix is
+reconstructed exactly.
+
+All candidate rules must match every training sample with zero residual.
+
+Fixed coordinate rules and shifts require at least two training samples.
+Structural relationships and tiling can be accepted directly from their
+geometry.
+
+The frontier target dtype is retained. A source matrix may only be converted to
+the target dtype when that conversion preserves every source value exactly.
+
+Successful matches update ST with:
+
+~~~text
+gp_gidx
+solution_rule
+solution_params
+~~~
+
+and return Matrix1GeneSolution records.

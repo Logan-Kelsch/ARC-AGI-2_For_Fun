@@ -539,3 +539,836 @@ def solve_0dim_1gene_basic(
         )
 
     return solved
+
+
+@dataclass(frozen=True)
+class Matrix1GeneSolution:
+    """One exact zero-residual 2D solution from one GP gene."""
+
+    sp_gidx: int
+    gp_gidx: int
+    rule: str
+    params: dict[str, Any]
+    target_dtype: np.dtype
+    complexity_level: int
+
+    @property
+    def expression(self) -> str:
+        if self.rule == "identity":
+            return "Y = X"
+        if self.rule == "embed_zero_structural":
+            return (
+                "Y = embed_zero("
+                f"X, position={self.params['position']})"
+            )
+        if self.rule == "embed_zero_fixed":
+            return (
+                "Y = embed_zero("
+                f"X, row={self.params['row']}, "
+                f"col={self.params['col']})"
+            )
+        if self.rule == "crop_structural":
+            return (
+                "Y = crop("
+                f"X, position={self.params['position']})"
+            )
+        if self.rule == "crop_fixed":
+            return (
+                "Y = crop("
+                f"X, row={self.params['row']}, "
+                f"col={self.params['col']})"
+            )
+        if self.rule == "shift_zero":
+            return (
+                "Y = shift_zero("
+                f"X, dr={self.params['dr']}, "
+                f"dc={self.params['dc']})"
+            )
+        if self.rule == "tile":
+            return (
+                "Y = tile("
+                f"X, rows={self.params['rows']}, "
+                f"cols={self.params['cols']})"
+            )
+        return self.rule
+
+
+def _matrix_dtype(gene: np.ndarray) -> np.dtype:
+    if not isinstance(gene, np.ndarray) or gene.ndim != 1:
+        raise ValueError(
+            "A 2D gene must be a 1D sample-axis ndarray."
+        )
+    if len(gene) == 0:
+        raise ValueError(
+            "A 2D gene must contain at least one sample."
+        )
+
+    dtypes: set[np.dtype] = set()
+
+    for value in gene:
+        array = np.asarray(value)
+
+        if array.ndim != 2:
+            raise ValueError(
+                "solve_2dim_1gene_basic requires only 2D genes."
+            )
+
+        dtypes.add(np.dtype(array.dtype))
+
+    if len(dtypes) != 1:
+        raise ValueError(
+            "All samples of one 2D gene must share one dtype."
+        )
+
+    return next(iter(dtypes))
+
+
+def _cast_matrix_exact(
+    value: Any,
+    target_dtype: np.dtype,
+) -> np.ndarray | None:
+    array = np.asarray(value)
+
+    if array.ndim != 2:
+        return None
+
+    try:
+        cast = array.astype(
+            target_dtype,
+            casting="unsafe",
+            copy=False,
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    try:
+        equal = np.array_equal(
+            cast,
+            array,
+            equal_nan=True,
+        )
+    except TypeError:
+        equal = np.array_equal(cast, array)
+
+    if not bool(equal):
+        return None
+
+    return np.asarray(cast, dtype=target_dtype).copy()
+
+
+def _matrices_exactly_equal(
+    predicted: np.ndarray,
+    target: np.ndarray,
+) -> bool:
+    if (
+        predicted.shape != target.shape
+        or predicted.dtype != target.dtype
+    ):
+        return False
+
+    try:
+        return bool(
+            np.array_equal(
+                predicted,
+                target,
+                equal_nan=True,
+            )
+        )
+    except TypeError:
+        return bool(np.array_equal(predicted, target))
+
+
+_SPATIAL_POSITIONS = (
+    "top_left",
+    "top_right",
+    "bottom_left",
+    "bottom_right",
+    "center",
+)
+
+
+def _structural_offset(
+    position: str,
+    container_shape: tuple[int, int],
+    item_shape: tuple[int, int],
+) -> tuple[int, int] | None:
+    ch, cw = container_shape
+    ih, iw = item_shape
+
+    if ih > ch or iw > cw:
+        return None
+
+    if position == "top_left":
+        return (0, 0)
+
+    if position == "top_right":
+        return (0, cw - iw)
+
+    if position == "bottom_left":
+        return (ch - ih, 0)
+
+    if position == "bottom_right":
+        return (ch - ih, cw - iw)
+
+    if position == "center":
+        dh = ch - ih
+        dw = cw - iw
+
+        # Only call something "center" when it is unambiguous.
+        if dh % 2 != 0 or dw % 2 != 0:
+            return None
+
+        return (dh // 2, dw // 2)
+
+    raise ValueError(f"Unknown structural position {position!r}.")
+
+
+def _embed_zero(
+    source: np.ndarray,
+    target_shape: tuple[int, int],
+    row: int,
+    col: int,
+    target_dtype: np.dtype,
+) -> np.ndarray | None:
+    source = _cast_matrix_exact(source, target_dtype)
+
+    if source is None:
+        return None
+
+    th, tw = target_shape
+    sh, sw = source.shape
+
+    if (
+        row < 0
+        or col < 0
+        or row + sh > th
+        or col + sw > tw
+    ):
+        return None
+
+    result = np.zeros(
+        target_shape,
+        dtype=target_dtype,
+    )
+    result[
+        row : row + sh,
+        col : col + sw,
+    ] = source
+
+    return result
+
+
+def _crop_at(
+    source: np.ndarray,
+    target_shape: tuple[int, int],
+    row: int,
+    col: int,
+    target_dtype: np.dtype,
+) -> np.ndarray | None:
+    source = _cast_matrix_exact(source, target_dtype)
+
+    if source is None:
+        return None
+
+    th, tw = target_shape
+    sh, sw = source.shape
+
+    if (
+        row < 0
+        or col < 0
+        or row + th > sh
+        or col + tw > sw
+    ):
+        return None
+
+    return source[
+        row : row + th,
+        col : col + tw,
+    ].copy()
+
+
+def _shift_zero(
+    source: np.ndarray,
+    dr: int,
+    dc: int,
+    target_dtype: np.dtype,
+) -> np.ndarray | None:
+    source = _cast_matrix_exact(source, target_dtype)
+
+    if source is None:
+        return None
+
+    h, w = source.shape
+    result = np.zeros(
+        source.shape,
+        dtype=target_dtype,
+    )
+
+    src_r0 = max(0, -dr)
+    src_r1 = min(h, h - dr)
+    src_c0 = max(0, -dc)
+    src_c1 = min(w, w - dc)
+
+    if src_r0 >= src_r1 or src_c0 >= src_c1:
+        return result
+
+    dst_r0 = src_r0 + dr
+    dst_r1 = src_r1 + dr
+    dst_c0 = src_c0 + dc
+    dst_c1 = src_c1 + dc
+
+    result[
+        dst_r0:dst_r1,
+        dst_c0:dst_c1,
+    ] = source[
+        src_r0:src_r1,
+        src_c0:src_c1,
+    ]
+
+    return result
+
+
+def _tile_matrix(
+    source: np.ndarray,
+    repeats: tuple[int, int],
+    target_dtype: np.dtype,
+) -> np.ndarray | None:
+    source = _cast_matrix_exact(source, target_dtype)
+
+    if source is None:
+        return None
+
+    rows, cols = repeats
+
+    if rows < 1 or cols < 1:
+        return None
+
+    return np.tile(source, (rows, cols))
+
+
+def _all_matrix_predictions_match(
+    x_gene: np.ndarray,
+    y_gene: np.ndarray,
+    builder,
+) -> bool:
+    target_dtype = _matrix_dtype(y_gene)
+
+    for x_value, y_value in zip(x_gene, y_gene):
+        target = np.asarray(
+            y_value,
+            dtype=target_dtype,
+        )
+        predicted = builder(
+            np.asarray(x_value),
+            target,
+            target_dtype,
+        )
+
+        if predicted is None:
+            return False
+
+        if not _matrices_exactly_equal(
+            predicted,
+            target,
+        ):
+            return False
+
+    return True
+
+
+def _candidate_2d_rule_solutions(
+    x_gene: np.ndarray,
+    y_gene: np.ndarray,
+) -> list[
+    tuple[
+        int,
+        tuple[Any, ...],
+        str,
+        dict[str, Any],
+    ]
+]:
+    """Return exact 2D rules in explicit minimum-complexity order."""
+    _matrix_dtype(x_gene)
+    target_dtype = _matrix_dtype(y_gene)
+
+    matches: list[
+        tuple[
+            int,
+            tuple[Any, ...],
+            str,
+            dict[str, Any],
+        ]
+    ] = []
+    n = len(y_gene)
+
+    def add(
+        level: int,
+        parameter_key: tuple[Any, ...],
+        rule: str,
+        params: dict[str, Any],
+    ) -> None:
+        matches.append(
+            (
+                level,
+                parameter_key,
+                rule,
+                params,
+            )
+        )
+
+    # Level 0: literal complete-matrix equality.
+    identity_ok = True
+
+    for x_value, y_value in zip(x_gene, y_gene):
+        x_cast = _cast_matrix_exact(
+            x_value,
+            target_dtype,
+        )
+        target = np.asarray(
+            y_value,
+            dtype=target_dtype,
+        )
+
+        if (
+            x_cast is None
+            or not _matrices_exactly_equal(
+                x_cast,
+                target,
+            )
+        ):
+            identity_ok = False
+            break
+
+    if identity_ok:
+        add(0, (), "identity", {})
+
+    # Level 1: zero-background structural embedding.
+    for position_rank, position in enumerate(
+        _SPATIAL_POSITIONS
+    ):
+        if _all_matrix_predictions_match(
+            x_gene,
+            y_gene,
+            lambda x, y, dtype, p=position: (
+                None
+                if (
+                    offset := _structural_offset(
+                        p,
+                        y.shape,
+                        x.shape,
+                    )
+                ) is None
+                else _embed_zero(
+                    x,
+                    y.shape,
+                    offset[0],
+                    offset[1],
+                    dtype,
+                )
+            ),
+        ):
+            add(
+                1,
+                (position_rank,),
+                "embed_zero_structural",
+                {"position": position},
+            )
+
+    # Level 2: zero-background fixed embedding.
+    x0 = np.asarray(x_gene[0])
+    y0 = np.asarray(y_gene[0])
+
+    if (
+        n >= 2
+        and x0.ndim == 2
+        and y0.ndim == 2
+        and x0.shape[0] <= y0.shape[0]
+        and x0.shape[1] <= y0.shape[1]
+    ):
+        for row in range(
+            y0.shape[0] - x0.shape[0] + 1
+        ):
+            for col in range(
+                y0.shape[1] - x0.shape[1] + 1
+            ):
+                if _all_matrix_predictions_match(
+                    x_gene,
+                    y_gene,
+                    lambda x, y, dtype, r=row, c=col: (
+                        _embed_zero(
+                            x,
+                            y.shape,
+                            r,
+                            c,
+                            dtype,
+                        )
+                    ),
+                ):
+                    add(
+                        2,
+                        (
+                            abs(row) + abs(col),
+                            row,
+                            col,
+                        ),
+                        "embed_zero_fixed",
+                        {
+                            "row": row,
+                            "col": col,
+                        },
+                    )
+
+    # Level 3: structural crop.
+    for position_rank, position in enumerate(
+        _SPATIAL_POSITIONS
+    ):
+        if _all_matrix_predictions_match(
+            x_gene,
+            y_gene,
+            lambda x, y, dtype, p=position: (
+                None
+                if (
+                    offset := _structural_offset(
+                        p,
+                        x.shape,
+                        y.shape,
+                    )
+                ) is None
+                else _crop_at(
+                    x,
+                    y.shape,
+                    offset[0],
+                    offset[1],
+                    dtype,
+                )
+            ),
+        ):
+            add(
+                3,
+                (position_rank,),
+                "crop_structural",
+                {"position": position},
+            )
+
+    # Level 4: fixed crop.
+    if (
+        n >= 2
+        and x0.ndim == 2
+        and y0.ndim == 2
+        and y0.shape[0] <= x0.shape[0]
+        and y0.shape[1] <= x0.shape[1]
+    ):
+        for row in range(
+            x0.shape[0] - y0.shape[0] + 1
+        ):
+            for col in range(
+                x0.shape[1] - y0.shape[1] + 1
+            ):
+                if _all_matrix_predictions_match(
+                    x_gene,
+                    y_gene,
+                    lambda x, y, dtype, r=row, c=col: (
+                        _crop_at(
+                            x,
+                            y.shape,
+                            r,
+                            c,
+                            dtype,
+                        )
+                    ),
+                ):
+                    add(
+                        4,
+                        (
+                            abs(row) + abs(col),
+                            row,
+                            col,
+                        ),
+                        "crop_fixed",
+                        {
+                            "row": row,
+                            "col": col,
+                        },
+                    )
+
+    # Level 5: same-canvas fixed translation with zero fill.
+    if n >= 2 and x0.shape == y0.shape:
+        h0, w0 = x0.shape
+
+        for dr in range(-(h0 - 1), h0):
+            for dc in range(-(w0 - 1), w0):
+                if dr == 0 and dc == 0:
+                    continue
+
+                if _all_matrix_predictions_match(
+                    x_gene,
+                    y_gene,
+                    lambda x, y, dtype, r=dr, c=dc: (
+                        None
+                        if x.shape != y.shape
+                        else _shift_zero(
+                            x,
+                            r,
+                            c,
+                            dtype,
+                        )
+                    ),
+                ):
+                    add(
+                        5,
+                        (
+                            abs(dr) + abs(dc),
+                            abs(dr),
+                            abs(dc),
+                            dr,
+                            dc,
+                        ),
+                        "shift_zero",
+                        {
+                            "dr": dr,
+                            "dc": dc,
+                        },
+                    )
+
+    # Level 6: fixed integer tiling factors.
+    if (
+        x0.shape[0] > 0
+        and x0.shape[1] > 0
+        and y0.shape[0] % x0.shape[0] == 0
+        and y0.shape[1] % x0.shape[1] == 0
+    ):
+        rows = y0.shape[0] // x0.shape[0]
+        cols = y0.shape[1] // x0.shape[1]
+
+        if (rows, cols) != (1, 1):
+            if _all_matrix_predictions_match(
+                x_gene,
+                y_gene,
+                lambda x, y, dtype, r=rows, c=cols: (
+                    None
+                    if (
+                        y.shape[0]
+                        != x.shape[0] * r
+                        or y.shape[1]
+                        != x.shape[1] * c
+                    )
+                    else _tile_matrix(
+                        x,
+                        (r, c),
+                        dtype,
+                    )
+                ),
+            ):
+                add(
+                    6,
+                    (
+                        rows * cols,
+                        rows + cols,
+                        rows,
+                        cols,
+                    ),
+                    "tile",
+                    {
+                        "rows": rows,
+                        "cols": cols,
+                    },
+                )
+
+    return matches
+
+
+def _map_2d_frontier_to_sp_gidx(
+    ST_frontier: np.ndarray,
+    SP_X: ProgramX,
+    ST: SolutionTree,
+) -> list[int]:
+    frontier_nodes = [
+        node_id
+        for node_id in ST.unresolved_frontier_nodes()
+        if (
+            ST[node_id].sp_gidx is not None
+            and ST[node_id].dims == 2
+        )
+    ]
+
+    unused = list(frontier_nodes)
+    mapped: list[int] = []
+
+    for frontier_gene in ST_frontier:
+        match_pos = None
+
+        for position, node_id in enumerate(unused):
+            sp_gidx = ST[node_id].sp_gidx
+
+            if genes_exactly_equal(
+                frontier_gene,
+                SP_X[sp_gidx],
+            ):
+                match_pos = position
+                break
+
+        if match_pos is None:
+            raise ValueError(
+                "An ST_frontier gene could not be mapped to an "
+                "unresolved 2D ST node."
+            )
+
+        node_id = unused.pop(match_pos)
+        sp_gidx = ST[node_id].sp_gidx
+
+        if not isinstance(sp_gidx, int):
+            raise RuntimeError(
+                "Concrete frontier node has no integer SP gene index."
+            )
+
+        mapped.append(sp_gidx)
+
+    return mapped
+
+
+def solve_2dim_1gene_basic(
+    GP_pool: np.ndarray,
+    ST_frontier: np.ndarray,
+    *,
+    GP_X: ProgramX,
+    SP_X: ProgramX,
+    ST: SolutionTree,
+) -> list[Matrix1GeneSolution]:
+    """Solve unresolved 2D ST targets from one 2D GP gene.
+
+    Exact minimum-complexity hierarchy:
+
+        0. Y = X
+        1. zero-background structural embed
+           top-left / top-right / bottom-left / bottom-right / center
+        2. zero-background fixed embed(row, col), n >= 2
+        3. structural crop
+        4. fixed crop(row, col), n >= 2
+        5. fixed translation shift_zero(dr, dc), n >= 2
+        6. fixed integer tile(rows, cols)
+
+    A candidate is accepted only when it reconstructs the complete target
+    exactly for every training sample.
+
+    "Contains X somewhere" is therefore not enough: embedding only solves Y
+    when all cells outside the embedded X are exactly zero / False.
+
+    Target dtype is retained. Source matrices may only be cast to the target
+    dtype when that cast preserves every value exactly.
+
+    Successful solutions are immediately written into ST with gp_gidx,
+    solution_rule, and solution_params.
+    """
+    if GP_X.side != "GP":
+        raise ValueError(
+            "solve_2dim_1gene_basic requires GP_X.side == 'GP'."
+        )
+    if SP_X.side != "SP":
+        raise ValueError(
+            "solve_2dim_1gene_basic requires SP_X.side == 'SP'."
+        )
+
+    if (
+        not isinstance(GP_pool, np.ndarray)
+        or GP_pool.ndim != 1
+    ):
+        raise ValueError("GP_pool must be a 1D ndarray.")
+
+    if (
+        not isinstance(ST_frontier, np.ndarray)
+        or ST_frontier.ndim != 1
+    ):
+        raise ValueError(
+            "ST_frontier must be a 1D ndarray."
+        )
+
+    for gene in GP_pool:
+        _matrix_dtype(gene)
+
+    for gene in ST_frontier:
+        _matrix_dtype(gene)
+
+    gp_entries = [
+        (
+            _find_gp_gidx(gene, GP_X),
+            gene,
+        )
+        for gene in GP_pool
+    ]
+    gp_entries.sort(key=lambda item: item[0])
+
+    target_sp_gidx = _map_2d_frontier_to_sp_gidx(
+        ST_frontier,
+        SP_X,
+        ST,
+    )
+
+    solved: list[Matrix1GeneSolution] = []
+
+    for y_gene, sp_gidx in zip(
+        ST_frontier,
+        target_sp_gidx,
+    ):
+        if ST.is_solved(sp_gidx):
+            continue
+
+        target_dtype = _matrix_dtype(y_gene)
+        exact_candidates = []
+
+        for gp_gidx, x_gene in gp_entries:
+            for (
+                level,
+                parameter_key,
+                rule,
+                params,
+            ) in _candidate_2d_rule_solutions(
+                x_gene,
+                y_gene,
+            ):
+                exact_candidates.append(
+                    (
+                        level,
+                        parameter_key,
+                        gp_gidx,
+                        rule,
+                        params,
+                    )
+                )
+
+        if not exact_candidates:
+            continue
+
+        (
+            level,
+            _,
+            gp_gidx,
+            rule,
+            params,
+        ) = min(
+            exact_candidates,
+            key=lambda item: (
+                item[0],
+                item[1],
+                item[2],
+            ),
+        )
+
+        ST.mark_solution(
+            sp_gidx,
+            gp_gidx,
+            rule=rule,
+            params=params,
+        )
+
+        solved.append(
+            Matrix1GeneSolution(
+                sp_gidx=sp_gidx,
+                gp_gidx=gp_gidx,
+                rule=rule,
+                params=dict(params),
+                target_dtype=target_dtype,
+                complexity_level=level,
+            )
+        )
+
+    return solved
