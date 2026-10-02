@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -10,6 +11,8 @@ from arc_agi2_fun.data import ArcTask, load_task_file
 from .environment import (
     ProgramMeta,
     ProgramX,
+    STNodeRef,
+    STSet,
     SolutionTree,
     get_GP_pool,
     get_ST_unsovled_frontier,
@@ -237,6 +240,93 @@ def _exact_test_match(
     return True
 
 
+
+def _st_progress(ST: SolutionTree) -> tuple[int, int, float]:
+    """Return solved/total concrete nodes reachable from the ST root."""
+    if not ST.roots:
+        return 0, 0, 1.0
+
+    reachable: set[Any] = set()
+
+    def visit_requirement(requirement: Any) -> None:
+        if isinstance(requirement, STNodeRef):
+            visit_node(requirement.node_id)
+            return
+
+        if isinstance(requirement, STSet):
+            for member in requirement.members:
+                visit_requirement(member)
+            return
+
+        # Inverse references are innate grammar knowledge and do not contribute
+        # concrete SP targets to the progress denominator.
+
+    def visit_node(node_id: Any) -> None:
+        if node_id in reachable:
+            return
+
+        reachable.add(node_id)
+        node = ST[node_id]
+
+        if node.derivation is not None:
+            visit_requirement(node.derivation)
+
+    for root in ST.roots:
+        visit_node(root)
+
+    concrete = [
+        node_id
+        for node_id in reachable
+        if ST[node_id].sp_gidx is not None
+    ]
+
+    total = len(concrete)
+
+    if total == 0:
+        return 0, 0, 1.0
+
+    solved = sum(
+        1
+        for node_id in concrete
+        if ST.is_solved(node_id)
+    )
+
+    return solved, total, solved / total
+
+
+def _print_iteration_status(
+    *,
+    verbosity: int,
+    iteration: int,
+    elapsed_seconds: float,
+    ST: SolutionTree,
+    GP_X: ProgramX,
+    SP_X: ProgramX,
+) -> None:
+    """Print one concise search-loop status line."""
+    if verbosity <= 0:
+        return
+
+    base = (
+        f"[iter {iteration}] "
+        f"{elapsed_seconds:.3f}s | "
+        f"solved={ST.solved}"
+    )
+
+    if verbosity == 1:
+        print(base)
+        return
+
+    solved_nodes, total_nodes, proportion = _st_progress(ST)
+
+    print(
+        f"{base} | "
+        f"ST={solved_nodes}/{total_nodes} "
+        f"({proportion:.1%}) | "
+        f"GP={len(GP_X)} | "
+        f"SP={len(SP_X)}"
+    )
+
 def synth(
     task_id: str,
     max_GP: int = 1000,
@@ -247,6 +337,7 @@ def synth(
     data_root: str | Path | None = None,
     split: str | None = None,
     select_residual_max_destinations: int = 5,
+    verbosity: int = 0,
 ) -> tuple[
     bool,
     Kelschinator,
@@ -284,6 +375,12 @@ def synth(
         Optional "training" or "evaluation".  When omitted, both are searched
         and an ambiguous duplicate task ID is rejected.
 
+    verbosity:
+        Search-loop reporting level:
+          0 = no wrapper status output
+          1 = iteration number, iteration time, and ST solved state
+          2 = level 1 plus reachable concrete-ST progress and GP/SP sizes
+
     Returns
     -------
     (
@@ -315,6 +412,9 @@ def synth(
     max_GP = int(max_GP)
     max_SP = int(max_SP)
     gen_size_GP = int(gen_size_GP)
+
+    if isinstance(verbosity, bool) or verbosity not in {0, 1, 2}:
+        raise ValueError("verbosity must be one of 0, 1, or 2.")
 
     if gen_size_GP == 0 and max_GP > 0:
         # Zero-size GP growth is legal, but it cannot ever advance the GP side.
@@ -367,6 +467,7 @@ def synth(
             break
 
         iterations += 1
+        iteration_started = perf_counter()
 
         if can_grow_gp:
             generated_gp = GP_generate(
@@ -395,6 +496,17 @@ def synth(
             GP_X,
             SP_X,
             ST,
+        )
+
+        _print_iteration_status(
+            verbosity=verbosity,
+            iteration=iterations,
+            elapsed_seconds=(
+                perf_counter() - iteration_started
+            ),
+            ST=ST,
+            GP_X=GP_X,
+            SP_X=SP_X,
         )
 
     kelschinator = Kelschinator()
