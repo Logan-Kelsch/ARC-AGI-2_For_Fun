@@ -247,6 +247,7 @@ Examples:
 ~~~text
 bool_sum
 bool_mat_ident
+partition_bool_subjects
 bool_cavity
 bool2_union
 bool2_intersect
@@ -882,6 +883,7 @@ bool2_union
 bool2_intersect
 bool_sum
 bool_mat_ident
+partition_bool_subjects
 bool_cavity
 
 mat2_cwrotate
