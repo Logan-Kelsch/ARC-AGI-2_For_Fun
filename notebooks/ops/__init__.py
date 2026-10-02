@@ -1,3 +1,4 @@
+from .wrap import synth
 from .kelschinator import (
     Kelschinator,
     KelschinatorCompileError,
@@ -106,6 +107,7 @@ from .loss import (
 )
 
 __all__ = [
+    "synth",
     "Kelschinator",
     "KelschinatorCompileError",
     "ProgramMeta",
