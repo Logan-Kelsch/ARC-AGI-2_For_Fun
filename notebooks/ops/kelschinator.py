@@ -800,6 +800,7 @@ class Kelschinator:
                         X_input,
                         instructions,
                         memo,
+                        context,
                     )
                     for child in plan.children
                 )
@@ -808,13 +809,25 @@ class Kelschinator:
         if isinstance(plan, _InversePlan):
             args: list[Any] = []
 
-            for child in plan.children:
+            for child_index, child in enumerate(plan.children):
                 value = self._eval_plan(
                     child,
                     X_input,
                     instructions,
                     memo,
+                    context,
                 )
+
+                if (
+                    plan.inverse_op == "inv_partition_shape"
+                    and child_index == 0
+                    and isinstance(value, _BundleValue)
+                    and len(value.values) == 2
+                ):
+                    context["root_output_shape"] = (
+                        int(np.asarray(value.values[0]).item()),
+                        int(np.asarray(value.values[1]).item()),
+                    )
 
                 if isinstance(value, _BundleValue):
                     args.extend(value.values)
@@ -834,6 +847,7 @@ class Kelschinator:
         self,
         source: Any,
         plan: _DirectPlan,
+        context: dict[str, Any],
     ) -> Any:
         rule = plan.rule
         params = plan.params
