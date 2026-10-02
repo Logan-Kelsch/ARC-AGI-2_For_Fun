@@ -648,6 +648,196 @@ class SolutionTree:
         )
 
 
+
+    def initialize_select_residual(
+        self,
+        SP_meta: ProgramMeta,
+        *,
+        source_destinations: dict[int, tuple[int, ...]],
+        support_gidxs: dict[
+            tuple[int, tuple[int, ...]],
+            int,
+        ],
+        color_gidx_by_value: dict[int, int],
+    ) -> None:
+        """Attach recursive select-residual layering as a root OR alternative.
+
+        For one source color x with destination set A, a logical layer node
+        Layer[x,A] chooses one destination y as the current base layer and
+        recursively carries A - {y} as the residual support.
+
+        The concrete support gene U[x,A] is shared by every branch that needs
+        that subset:
+
+            U[x,A] = (input == x) AND (output in A)
+
+        This forms a DAG over destination subsets rather than duplicating all
+        n! complete paint orders.
+        """
+        if not source_destinations:
+            return
+
+        self.sync(SP_meta)
+
+        for key, gidx in support_gidxs.items():
+            if gidx not in self.nodes:
+                raise KeyError(
+                    f"Missing select-residual support ST node {gidx}."
+                )
+
+            source_color, destinations = key
+            destination_text = ",".join(
+                str(value) for value in destinations
+            )
+            self.nodes[gidx].label = (
+                f"sr_support x={source_color} -> "
+                f"{{{destination_text}}}"
+            )
+
+        for destinations in source_destinations.values():
+            for color in destinations:
+                if color not in color_gidx_by_value:
+                    raise KeyError(
+                        "Select-residual destination color "
+                        f"{color} has no composite color-ID gene."
+                    )
+
+        def layer_id(
+            source_color: int,
+            destinations: tuple[int, ...],
+        ) -> str:
+            joined = ",".join(str(value) for value in destinations)
+            return f"select_residual:x={source_color}:A={joined}"
+
+        # Allocate every logical subset layer first so recursive references
+        # can share nodes regardless of construction order.
+        for source_color, destinations in source_destinations.items():
+            for subset_size in range(1, len(destinations) + 1):
+                import itertools
+
+                for subset in itertools.combinations(
+                    destinations,
+                    subset_size,
+                ):
+                    subset = tuple(int(value) for value in subset)
+                    node_id = layer_id(source_color, subset)
+
+                    self.nodes[node_id] = STNode(
+                        node_id=node_id,
+                        label=(
+                            f"select-residual layer x={source_color} "
+                            f"A={subset}"
+                        ),
+                        sp_gidx=None,
+                        op="logical_select_residual_layer",
+                        dims=2,
+                    )
+
+        # Populate each logical layer with OR choices for its selected/base
+        # destination.  A singleton is the recursion base case.
+        for source_color, destinations in source_destinations.items():
+            for subset_size in range(1, len(destinations) + 1):
+                import itertools
+
+                for subset in itertools.combinations(
+                    destinations,
+                    subset_size,
+                ):
+                    subset = tuple(int(value) for value in subset)
+                    node_id = layer_id(source_color, subset)
+                    support_gidx = support_gidxs[
+                        (int(source_color), subset)
+                    ]
+
+                    branches: list[STSet] = []
+
+                    if len(subset) == 1:
+                        color = subset[0]
+                        branches.append(
+                            STSet(
+                                mode="AND",
+                                members=[
+                                    STInverseRef(
+                                        "inv_select_residual_leaf"
+                                    ),
+                                    STNodeRef(
+                                        color_gidx_by_value[color]
+                                    ),
+                                    STNodeRef(support_gidx),
+                                ],
+                                label=(
+                                    f"paint singleton {source_color}"
+                                    f"->{color}"
+                                ),
+                                partition="and",
+                            )
+                        )
+                    else:
+                        for selected in subset:
+                            residual = tuple(
+                                value
+                                for value in subset
+                                if value != selected
+                            )
+
+                            branches.append(
+                                STSet(
+                                    mode="AND",
+                                    members=[
+                                        STInverseRef(
+                                            "inv_select_residual_step"
+                                        ),
+                                        STNodeRef(
+                                            color_gidx_by_value[selected]
+                                        ),
+                                        STNodeRef(support_gidx),
+                                        STNodeRef(
+                                            layer_id(
+                                                source_color,
+                                                residual,
+                                            )
+                                        ),
+                                    ],
+                                    label=(
+                                        f"select {source_color}->{selected}; "
+                                        f"carry {residual}"
+                                    ),
+                                    partition="and",
+                                )
+                            )
+
+                    self.nodes[node_id].derivation = STSet(
+                        mode="OR",
+                        members=branches,
+                        label=f"{node_id} alternatives",
+                    )
+
+        top_layers = [
+            STNodeRef(
+                layer_id(
+                    source_color,
+                    tuple(destinations),
+                )
+            )
+            for source_color, destinations in sorted(
+                source_destinations.items()
+            )
+        ]
+
+        root_branch = STSet(
+            mode="AND",
+            members=[
+                STInverseRef(
+                    "inv_partition_select_residual"
+                ),
+                *top_layers,
+            ],
+            label="select-residual output layering",
+            partition="and",
+        )
+
+        self._append_alternative(0, root_branch)
+
     def register_generation(
         self,
         SP_meta: ProgramMeta,
