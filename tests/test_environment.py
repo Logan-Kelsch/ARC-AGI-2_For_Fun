@@ -43,6 +43,7 @@ from notebooks.ops.ops import (
     partition_composite,
     partition_shape,
     valid_generation,
+    _sample_uniform_legal_candidate,
 )
 
 
@@ -1191,6 +1192,140 @@ def test_exact_transition_duplicate_includes_operation_source_and_params():
     OP_REGISTRY.pop("test_take_n", None)
 
 
+
+def test_uniform_operation_sampling_is_not_weighted_by_source_count():
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=1)
+
+    for value in range(5):
+        X.append_gene([np.int64(value)])
+        meta.append(
+            source=-1,
+            op=f"raw_{value}",
+            dims=0,
+        )
+
+    def only_first_source(meta, X, source_idx, params):
+        return int(source_idx) == 0
+
+    @operation(
+        partition="null",
+        output_count=1,
+        allowed_dims=(0,),
+        validator=only_first_source,
+    )
+    def test_one_source_op(meta, X, source_idx):
+        raise AssertionError("sampling test should not execute operations")
+
+    @operation(
+        partition="null",
+        output_count=1,
+        allowed_dims=(0,),
+    )
+    def test_five_source_op(meta, X, source_idx):
+        raise AssertionError("sampling test should not execute operations")
+
+    rng = np.random.default_rng(12345)
+    op_counts = {
+        "test_one_source_op": 0,
+        "test_five_source_op": 0,
+    }
+    five_source_counts = {
+        source_idx: 0
+        for source_idx in range(5)
+    }
+
+    for _ in range(4000):
+        candidate = _sample_uniform_legal_candidate(
+            meta,
+            X,
+            rng=rng,
+            operation_names=(
+                "test_one_source_op",
+                "test_five_source_op",
+            ),
+        )
+
+        assert candidate is not None
+
+        info, source_idx, params = candidate
+
+        assert params == {}
+        op_counts[info.name] += 1
+
+        if info.name == "test_one_source_op":
+            assert source_idx == 0
+        else:
+            five_source_counts[int(source_idx)] += 1
+
+    one_share = (
+        op_counts["test_one_source_op"] / 4000
+    )
+
+    # The old combined (operation, source) lottery would put this operation
+    # near 1/6 because it has one source versus five. The hierarchical sampler
+    # gives each legal operation one equal first-stage slot.
+    assert 0.45 <= one_share <= 0.55
+
+    five_total = op_counts["test_five_source_op"]
+
+    for count in five_source_counts.values():
+        source_share = count / five_total
+        assert 0.16 <= source_share <= 0.24
+
+    OP_REGISTRY.pop("test_one_source_op", None)
+    OP_REGISTRY.pop("test_five_source_op", None)
+
+
+def test_gp_duplicate_retry_keeps_same_prior_until_100_failure_switch(capsys):
+    attempts = [0]
+
+    @operation(
+        partition="null",
+        output_count=1,
+        min_dims_exclusive=-1,
+    )
+    def test_always_duplicate(meta, X, source_idx):
+        attempts[0] += 1
+        values = [
+            np.asarray(value).copy()
+            for value in X[source_idx]
+        ]
+        gidx = X.append_gene(values)
+        meta.append(
+            source=source_idx,
+            op="test_always_duplicate",
+            dims=meta.dims[source_idx],
+        )
+        return gidx
+
+    meta, X = _raw_program(
+        "GP",
+        [np.array([[1, 2]], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+
+    created = GP_generate(
+        meta,
+        X,
+        1,
+        rng=0,
+        operation_names=("test_always_duplicate",),
+    )
+
+    output = capsys.readouterr().out
+
+    assert created == []
+    assert attempts[0] == 100
+    assert len(meta) == len(X) == 1
+    assert (
+        "100 consecutive rejected stochastic attempts"
+        in output
+    )
+
+    OP_REGISTRY.pop("test_always_duplicate", None)
+
+
 def test_gp_generate_never_retains_equivalent_gene_data():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
@@ -1393,7 +1528,7 @@ def test_duplicate_output_operation_is_rolled_back_and_space_exhausts(capsys):
     assert len(meta) == 1
     assert len(X) == 1
     assert (
-        "entire legal generation space was explored"
+        "100 consecutive rejected stochastic attempts"
         in output
     )
 
@@ -1499,7 +1634,7 @@ def test_sp_generation_rolls_back_duplicate_data_and_reports_exhaustion(capsys):
     assert created == []
     assert len(meta) == len(X) == len(ST) == 1
     assert (
-        "entire legal generation space was explored"
+        "100 consecutive rejected stochastic attempts"
         in output
     )
 
