@@ -687,6 +687,36 @@ executable symbolic program
 
 ---
 
+## One-call synthesis wrapper
+
+For ordinary experimentation, the current search lifecycle is wrapped by:
+
+~~~python
+from notebooks.ops import synth
+
+(
+    solved_exactly,
+    kelschinator,
+    final_gp_len,
+    final_sp_len,
+    final_gp_ops,
+    final_sp_ops,
+    iterations,
+) = synth(
+    task_id,
+    max_GP=1000,
+    max_SP=1000,
+    gen_size_GP=10,
+)
+~~~
+
+`max_GP` and `max_SP` are loose ceilings: if a side is below its ceiling at the beginning of an iteration, that generation call is allowed to finish even if the resulting gene count crosses the limit.
+
+The wrapper repeatedly grows GP/SP, reruns the currently implemented exact 0D/2D matchers, stops when ST solves or both search sides can no longer grow, distills the proof with Kelschinator, and finally checks every known test output for exact equality.
+
+The operation counts report distinct operation applications rather than genes, so a multi-output partition is counted once.
+
+---
 ## End-to-end notebook skeleton
 
 ~~~python
