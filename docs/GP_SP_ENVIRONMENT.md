@@ -1,158 +1,132 @@
-# GP / SP environment architecture
+# GP / SP / ST Architecture
 
-This is the new experimental architecture for ARC program synthesis.
+This document describes the current experimental architecture for **bidirectional symbolic program synthesis** in ARC-AGI-2.
 
-The environment has exactly five primary components:
+The system searches from both ends of each training pair:
+
+~~~text
+input
+  |
+  v
+forward GP program growth
+  |
+  v
+candidate semantics
+  |
+  +--------------------+
+                       |
+                 exact symbolic matching
+                       |
+  +--------------------+
+  |
+  v
+required semantics
+  ^
+  |
+backward SP/ST solution decomposition
+  ^
+  |
+output
+~~~
+
+A solved Boolean proof is then compiled by **Kelschinator** into an executable transformation for unseen test inputs.
+
+The older GP_Set and descriptive loss-tree code remains in the repository as reference. New architecture work should generally target:
+
+~~~text
+environment.py
+ops.py
+inv_ops.py
+solve.py
+kelschinator.py
+~~~
+
+---
+
+# 1. Data model
+
+The live search environment contains:
 
 ~~~text
 GP_meta
 GP_X
+
 SP_meta
 SP_X
+
 ST
 ~~~
 
-The older GP_Set / loss-tree implementation remains in the repository for
-reference while this architecture is developed.
-
-## 1. GP_meta
-
-GP_meta is gene-parallel metadata for transformations of the input side.
-
-For gene index i:
+ProgramMeta is gene-parallel metadata. For every gene index gidx:
 
 ~~~python
-GP_meta.source[i]
-GP_meta.op[i]
-GP_meta.dims[i]
+meta.source[gidx]
+meta.op[gidx]
+meta.dims[gidx]
+meta.params[gidx]
 ~~~
 
-describe:
+describe the instantiated data in:
 
 ~~~python
-GP_X[i]
+X[gidx]
 ~~~
 
-source identifies the gene or genes required to generate i.
+source records the parent gene or genes, op records the registered transformation, dims records instantiated dimensionality, and params stores exact operation parameters.
 
-op identifies the registered transformation operation.
-
-dims is the number of dimensions in the instantiated data for that gene.
-
-Examples:
-
-~~~text
-dims = 0    scalar
-dims = 1    vector
-dims = 2    matrix
-dims = 3    stack of matrices / tensor
-~~~
-
-## 2. GP_X
-
-GP_X contains actual instantiated input-side gene data.
-
-Its indexing order is:
-
-~~~text
-first index   gene index
-second index  training sample index
-~~~
-
-so:
+ProgramX is gene-major:
 
 ~~~python
-GP_X[gidx][sample_idx]
-GP_X[gidx, sample_idx]
+X[gidx]
+X[gidx, sample_idx]
 ~~~
 
-refer to one instantiated gene value.
+X[gidx] is a 1D object array containing the same symbolic gene across every training sample. Sample-specific matrix shapes are allowed while the gene meaning remains stable.
 
-Different samples may have different spatial shapes because each gene stores a
-1D object array across samples.
+---
 
-## 3. SP_meta
+# 2. GP: forward symbolic search
 
-SP_meta has the same structure as GP_meta but describes transformations of the
-known training outputs.
-
-SP is constrained more strictly than GP:
-
-SP operations are classified by partition semantics:
+GP begins from the input grids:
 
 ~~~text
-and   child outputs are jointly required to reconstruct/validate the parent
-or    a reversible transformed representation is an alternative way to solve it
-null  not a valid SP proof transformation
+GP_X[0] = training input matrices
 ~~~
 
-SP may use only AND/OR operations. NULL operations remain GP-only.
-
-## 4. SP_X
-
-SP_X is the output-side instantiated program data with the same gene-major
-indexing:
-
-~~~python
-SP_X[gidx][sample_idx]
-~~~
-
-SP_X is not a predicted output. It is a fully observed decomposition of the
-known training solution used to define what GP eventually needs to explain.
-
-## 5. ST
-
-ST is the SolutionTree derived from SP_meta.
-
-Each SP gene has an ST node containing:
+Forward operations grow candidate symbolic interpretations:
 
 ~~~text
-sp_gidx
-op
-dims
-parents
-children
-gp_gidx
+raw input
+   |
+   +--> partitions
+   +--> masks
+   +--> rotations
+   +--> flips
+   +--> boolean transforms
+   +--> scalar summaries
+   +--> ...
+   |
+   v
+candidate semantic program space
 ~~~
 
-Initially:
+GP may use any registered operation that satisfies its source constraints.
+
+The purpose of GP is not to predict the output directly. It generates symbolic state that may exactly explain pieces of the output-side proof.
+
+---
+
+# 3. SP: backward symbolic search
+
+SP begins from the known training outputs:
 
 ~~~text
-gp_gidx = -1
+SP_X[0] = training output matrices
 ~~~
 
-meaning no exact GP gene has yet been associated with that solution-program
-node.
+SP explores alternate reconstructive representations of those targets.
 
-A future evaluator will compare GP_X against SP_X across all training samples.
-When a GP gene exactly represents an SP gene, ST can record:
-
-~~~python
-ST.mark_solution(sp_gidx, gp_gidx)
-~~~
-
-ST is a Boolean proof structure over SP targets rather than a simple dependency
-tree. It records direct GP matches plus nested AND/OR alternatives created by
-reversible SP transformations.
-
-## Registered operations
-
-Transformation operations live in:
-
-~~~text
-notebooks/ops/ops.py
-~~~
-
-Operations use the same interface on either side:
-
-~~~python
-operation(GP_meta, GP_X, source_idx)
-operation(SP_meta, SP_X, source_idx)
-~~~
-
-The operation layer checks that meta and X belong to the same side.
-
-Every registered operation declares:
+Each operation declares:
 
 ~~~text
 partition = "and" | "or" | "null"
@@ -160,83 +134,124 @@ inverse_op
 output_count
 ~~~
 
-GP may use any registered transformation.
+## AND
 
-SP may use only AND/OR operations. NULL operations are excluded because their
-result does not provide a valid reversible proof of the source.
+An AND operation decomposes a source into children that are jointly sufficient to reconstruct or validate it.
 
-## Initial operations
-
-### partition_shape
-
-~~~python
-h_gidx, w_gidx = partition_shape(meta, X, source_idx)
-~~~
-
-For a 2D source it generates two scalar np.int64 genes:
+Current examples:
 
 ~~~text
-height
-width
+partition_shape
+partition_composite
+partition_bool_trim
+indiv_1dim
 ~~~
 
-Both have dims=0.
-
-On ST, shape is represented as:
+A conceptual proof branch is:
 
 ~~~text
-shape = h AND w
+inverse
+AND child_0
+AND child_1
+AND ...
 ~~~
 
-and inv_partition_shape(h, w, composite) verifies that the reconstructed
-composite has the solved dimensions.
+## OR
 
-### partition_composite
+An OR operation creates a reversible alternate representation.
 
-~~~python
-generated_gidx = partition_composite(
-    meta,
-    X,
-    source_idx,
+Example:
+
+~~~text
+C
+OR
+(
+    inv_mat2_cwrotate
+    AND rotated_C
 )
 ~~~
 
-The operation finds the sorted union of colors used across all training samples.
-
-For each color it creates two separate gene-major outputs:
+Current OR operations include:
 
 ~~~text
-color_k_id        scalar np.int64
-color_k_presence  2D boolean matrix
+bool_complement
+mat2_cwrotate
+dim0_flip
+dim1_flip
+dim2_flip
 ~~~
 
-So a three-color source creates six genes:
+## NULL
+
+NULL operations are useful on GP but do not create a valid reconstructive SP proof.
+
+Current examples:
 
 ~~~text
-color_1_id
-color_1_presence
-color_2_id
-color_2_presence
-color_3_id
-color_3_presence
+bool_sum
+bool_cavity
+bool2_union
+bool2_intersect
 ~~~
 
-The color-ID gene is constant across samples. If that color is absent from a
-particular sample, its corresponding presence gene contains an all-False matrix
-with that sample's spatial shape.
+Information-losing and multi-source transformations are currently NULL and GP-only.
 
-This keeps the number and meaning of gene indices aligned across all samples
-while exposing each categorical component independently to GP/SP matching.
+---
 
-partition_composite is a dynamic-output operation:
+# 4. ST: Boolean Solution Tree
+
+SolutionTree is the proof layer connecting GP and SP.
+
+ST uses:
 
 ~~~text
-output_count = 2 * number of distinct colors across all samples
+STNodeRef
+STInverseRef
+STSet(mode="AND")
+STSet(mode="OR")
 ~~~
 
-Both initial operations are AND partitions and are legal on SP.
+A semantic node may be solved:
 
-## init_env
+1. directly from GP; or
+2. through a satisfied Boolean derivation.
+
+A direct solution records:
+
+~~~text
+gp_gidx
+solution_rule
+solution_params
+~~~
+
+For example:
+
+~~~text
+gp_gidx = 17
+solution_rule = "add_constant"
+solution_params = {"c": 2}
+~~~
+
+This means the target is reconstructed from GP gene 17 through y = x + 2.
+
+A node can also remain without a direct GP index and become solved through a reversible branch:
+
+~~~text
+C
+OR
+(
+    inverse
+    AND transformed_C
+)
+~~~
+
+Boolean solved state propagates toward the root.
+
+---
+
+# 5. Initialization
+
+The main entry point is:
 
 ~~~python
 GP_meta, GP_X, SP_meta, SP_X, ST = init_env(task.train)
@@ -245,76 +260,217 @@ GP_meta, GP_X, SP_meta, SP_X, ST = init_env(task.train)
 Initialization creates raw gene 0:
 
 ~~~text
-GP_X[0] = input matrices across samples
-SP_X[0] = output matrices across samples
+GP_X[0] = inputs
+SP_X[0] = outputs
 ~~~
 
-Then it applies partition_shape and partition_composite to gene 0 on both
-sides.
+Then both sides receive partition_shape and partition_composite.
 
-The initial gene table is variable-length because the composite partition now
-creates one pair per distinct color:
+## partition_shape
+
+~~~python
+h_gidx, w_gidx = partition_shape(
+    meta,
+    X,
+    source_idx,
+)
+~~~
+
+A 2D source produces scalar int64 height and width genes:
 
 ~~~text
-gidx   op                     source   dims
-
-0      raw_input/output       -1       2
-1      partition_shape         0       0   h
-2      partition_shape         0       0   w
-3      partition_composite     0       0   first color ID
-4      partition_composite     0       2   first color presence
-5      partition_composite     0       0   second color ID
-6      partition_composite     0       2   second color presence
-...    ...                      ...     ...
+shape = h AND w
 ~~~
 
-For C distinct colors, initialization creates:
+The inverse:
+
+~~~python
+inv_partition_shape(h, w, composite)
+~~~
+
+validates reconstructed dimensions.
+
+## partition_composite
+
+For every categorical color observed across the training set:
 
 ~~~text
-3 + 2*C total genes
+color_id        scalar int64
+color_presence  2D bool
 ~~~
 
-on that side.
+The inverse:
 
-The initial ST is derived directly from however many SP genes this produces.
+~~~python
+inv_partition_composite(
+    color0,
+    mask0,
+    color1,
+    mask1,
+    ...
+)
+~~~
 
-and every node begins with:
+reassembles the categorical matrix exactly.
+
+For C colors, each side initially contains:
 
 ~~~text
-gp_gidx = -1
+3 + 2*C genes
 ~~~
 
-## Direction from here
-
-GP is the expanding search space.
-
-SP is the exact output decomposition and may only expand through full
-partitions.
-
-ST is the bridge between them:
+with:
 
 ~~~text
-GP_meta / GP_X
-      |
-      | exact cross-sample matches
-      v
-      ST
-      ^
-      |
-SP_meta / SP_X
+0      raw grid
+1      h
+2      w
+3+     color ID / presence pairs
 ~~~
 
-The next evaluation layer can therefore operate on a much simpler invariant:
+## Initial Boolean proof
 
-> Find GP genes whose instantiated values exactly equal an SP gene across every
-> training sample, then record the GP gene index in the corresponding ST node.
+Conceptually:
 
+~~~text
+ROOT
+=
+inv_partition_shape
+AND shape
+AND composite
+~~~
 
-## Random program generation
+where:
 
-The environment now supports constrained random expansion of GP and SP.
+~~~text
+shape = h AND w
+~~~
 
-### valid_generation
+and:
+
+~~~text
+composite
+=
+inv_partition_composite
+AND color_0_id
+AND color_0_presence
+AND color_1_id
+AND color_1_presence
+AND ...
+~~~
+
+Known inverse operations are innate grammar knowledge and do not need to be discovered by GP.
+
+init_env also binds GP_meta, GP_X, and SP_X to ST so a solved proof can later be distilled by Kelschinator.fit(ST).
+
+---
+
+# 6. Operation registry
+
+Forward operations live in:
+
+~~~text
+notebooks/ops/ops.py
+~~~
+
+Inverse and reconstruction operations live in:
+
+~~~text
+notebooks/ops/inv_ops.py
+~~~
+
+The registries are:
+
+~~~python
+OP_REGISTRY
+INV_OP_REGISTRY
+~~~
+
+Operations can declare:
+
+~~~text
+partition
+inverse_op
+output_count
+output_count_estimator
+
+source_count
+ordered_sources
+
+min_dims_exclusive
+allowed_dims
+atomic_dtypes
+
+parameter_sampler
+validator
+~~~
+
+This supports fixed and dynamic output counts, multi-source operations, commutative sources, dimensional restrictions, dtype restrictions, and custom validity rules.
+
+---
+
+# 7. Current operation families
+
+Structural partitions:
+
+~~~text
+partition_shape
+partition_composite
+indiv_1dim
+partition_bool_trim
+~~~
+
+Reversible unary transforms:
+
+~~~text
+bool_complement
+mat2_cwrotate
+dim0_flip
+dim1_flip
+dim2_flip
+~~~
+
+GP-only NULL transforms:
+
+~~~text
+bool_sum
+bool_cavity
+bool2_union
+bool2_intersect
+~~~
+
+## indiv_1dim
+
+A 1D source of length L becomes L scalar genes:
+
+~~~text
+[a, b, c]
+->
+a
+b
+c
+~~~
+
+On SP:
+
+~~~text
+source
+OR
+(
+    inv_indiv_1dim
+    AND element_0
+    AND element_1
+    AND element_2
+)
+~~~
+
+All samples must have the same vector length so position semantics remain stable.
+
+---
+
+# 8. Program generation
+
+## valid_generation
 
 ~~~python
 valid_generation(
@@ -326,122 +482,45 @@ valid_generation(
 )
 ~~~
 
-checks a candidate transformation before it is instantiated.
+checks side consistency, source existence, SP proof legality, dimensionality, atomic dtype, custom validators, and duplicate transition identity.
 
-The current checks are:
-
-1. metadata and X belong to the same side and remain gene-parallel;
-2. the source gene exists;
-3. SP may only use AND/OR partition operations;
-4. the source satisfies the operation's dimensionality restriction;
-5. the source satisfies the operation's atomic dtype restriction;
-6. any operation-specific validator accepts the candidate;
-7. the exact transformation signature has not already been used.
-
-The exact transformation signature is:
+A transition is identified by:
 
 ~~~text
-(operation, source gene index, exact parameters)
+operation
+source gene(s)
+exact parameters
 ~~~
 
-For multi-output operations, every output gene records the same signature.
+## Exact instantiated-gene novelty
 
-ProgramMeta therefore now also retains:
+Generation also rejects candidate outputs whose full cross-sample values exactly duplicate retained genes.
+
+Exact equality includes representation, shape, dtype, contents, and all training samples.
+
+Useful helpers:
 
 ~~~python
-meta.params[gidx]
+genes_exactly_equal(...)
+equivalent_gene_idx(...)
 ~~~
 
-alongside source, op, and dims.
+Multi-output generation is transactional: if any output is redundant, the whole invocation is rolled back.
 
-### Operation generation metadata
-
-The operation decorator supports reusable search constraints:
-
-~~~python
-@operation(
-    partition="and",
-    inverse_op="inv_example",
-    output_count=1,
-    min_dims_exclusive=0,
-    atomic_dtypes=(np.int64,),
-    parameter_sampler=...,
-    validator=...,
-)
-~~~
-
-The initial operations are configured as follows.
-
-partition_shape:
-
-~~~text
-source dims == 2
-dtype unrestricted
-~~~
-
-partition_composite:
-
-~~~text
-source dims > 1
-atomic dtype == int64
-~~~
-
-Parameter samplers are currently unused by the initial two operations, but the
-registry supports them for future integer/axis/kernel/etc. parameters.
-
-### Atomic dtype
-
-Generation restrictions use the atomic dtype of instantiated source values, not
-the dtype of the outer object array used by ProgramX.
-
-For example:
-
-~~~text
-2D np.int64 grid        -> atomic dtype int64
-3D boolean mask stack   -> atomic dtype bool
-1D float vector         -> atomic dtype float64
-~~~
-
-For nested object structures, atomic dtypes are collected recursively across all
-samples.
-
-### GP_generate
+## GP_generate
 
 ~~~python
 new_gidx = GP_generate(
     GP_meta,
     GP_X,
-    n_new_genes=20,
+    n_new_genes=10,
     rng=0,
 )
 ~~~
 
-GP_generate repeatedly:
+n_new_genes is an output-gene budget.
 
-~~~text
-random registered operation
-        +
-random existing GP gene
-        +
-random operation parameters
-        |
-        v
-valid_generation
-        |
-        v
-instantiate operation
-~~~
-
-until the requested gene budget is filled or no valid generation remains.
-
-The requested count is a gene-count budget, not an operation-count budget.
-Before selecting a candidate, generation asks the operation how many outputs it
-would produce on that exact source. This supports both fixed-output operations
-and dynamic operations such as partition_composite.
-
-The returned list contains the newly created GP gene indices.
-
-### SP_generate
+## SP_generate
 
 ~~~python
 new_sp_gidx = SP_generate(
@@ -452,745 +531,88 @@ new_sp_gidx = SP_generate(
 )
 ~~~
 
-SP_generate performs one random valid SP operation application.
+One call performs one reversible SP transformation. When ST is supplied, the corresponding Boolean proof alternative is registered immediately.
 
-SP generation automatically excludes NULL operations and may sample reversible
-AND/OR transformations.
+---
 
-One SP generation step may add multiple genes when the chosen operation has
-multiple outputs.
+# 9. Typed computation pools
 
-If ST is supplied, it is automatically synchronized after SP grows.
+The matching layer uses compatible slices of GP and the unresolved ST frontier.
 
-### Duplicate prevention
-
-Suppose the metadata already contains:
-
-~~~text
-op      = translate
-source  = 7
-params  = {"dx": 2, "dy": -1}
-~~~
-
-then that exact transition cannot be generated again.
-
-However these remain distinct candidates:
-
-~~~text
-translate(source=7, dx=3, dy=-1)
-translate(source=8, dx=2, dy=-1)
-rotate(source=7, ...)
-~~~
-
-This allows the operation library to grow substantially without relying on
-special-case duplicate rules for individual transformations.
-
-
-## Exact instantiated-gene novelty
-
-Generation now prevents a second form of redundancy in addition to duplicate
-operation/source/parameter transitions.
-
-A newly instantiated gene is retained only when its complete cross-sample data
-is novel relative to every gene already present on that side.
-
-Exact gene equality requires every sample value to match structurally:
-
-~~~text
-same representation type
-same array shape
-same array dtype
-same contents
-~~~
-
-and the complete gene must match across every training sample.
-
-Useful helpers:
+## GP pool
 
 ~~~python
-genes_exactly_equal(GP_X[i], GP_X[j])
-
-equivalent_gene_idx(
+GP_pool = get_GP_pool(
+    GP_meta,
     GP_X,
-    candidate_gene_values,
-)
-~~~
-
-equivalent_gene_idx returns the matching retained gene index, or -1 when the
-candidate is novel.
-
-### Transactional generation
-
-Random generation applies candidates transactionally.
-
-Conceptually:
-
-~~~text
-candidate operation
-        |
-        v
-instantiate temporary output gene(s)
-        |
-        v
-compare every output against all retained genes
-        |
-        +---- duplicate ----> rollback entire operation
-        |
-        '---- all novel ----> retain operation
-~~~
-
-For a multi-output operation, every output must be novel.
-
-If one output duplicates an existing gene, the complete operation invocation is
-rolled back rather than retaining only a partial partition.
-
-Outputs from the same invocation are also checked against one another.
-
-## Exhausting the legal generation space
-
-For the current parameterless operation library, GP_generate and SP_generate
-enumerate every legal operation/source candidate that remains after normal
-generation constraints.
-
-Candidates are shuffled before evaluation, so the search order remains random,
-but every legal candidate can be tried once.
-
-If all legal candidates either:
-
-- were already instantiated as exact transitions, or
-- instantiate data that exactly duplicates retained genes,
-
-generation stops early and prints:
-
-~~~text
-GP generation terminated: entire legal generation space was explored and no additional unique genes can be generated.
-~~~
-
-or the corresponding SP message.
-
-This means the generation loop does not continue retrying known-dead branches
-after the current grammar is saturated.
-
-Parameterized operations whose sampler has an effectively unbounded parameter
-domain cannot honestly be called exhaustively searched. Those retain bounded
-sampling behavior and print a separate sampled-parameter-space termination
-message if no novel output is found.
-
-
-## Boolean and spatial operation expansion
-
-The operation registry now supports source arity directly.
-
-~~~python
-@operation(
-    source_count=2,
-    ordered_sources=False,
-    ...
-)
-~~~
-
-allows a transformation to consume multiple GP genes.
-
-For commutative operations such as boolean union/intersection,
-ordered_sources=False canonicalizes the source pair so:
-
-~~~text
-op(source=(4, 7))
-op(source=(7, 4))
-~~~
-
-are the same transformation signature.
-
-Generation enumerates source combinations automatically, so binary operations
-participate in GP_generate without custom search code.
-
-The registry also supports exact dimensional restrictions through:
-
-~~~python
-allowed_dims=(2,)
-~~~
-
-in addition to the existing dims > N rule.
-
-### bool_complement
-
-~~~text
-source_count: 1
-dtype: bool
-dims: any
-partition: null/or as appropriate
-~~~
-
-Computes the boolean complement of the complete source tensor while preserving
-its shape.
-
-### bool2_union
-
-~~~text
-source_count: 2
-dtype: bool for both sources
-shape: identical per sample
-dims: any
-sources: unordered / commutative
-partition: null/or as appropriate
-~~~
-
-Computes elementwise logical OR.
-
-### bool2_intersect
-
-Same constraints as bool2_union, but computes elementwise logical AND.
-
-### mat2_cwrotate
-
-~~~text
-source_count: 1
-dims: exactly 2
-dtype: unrestricted
-partition: null/or as appropriate
-~~~
-
-Rotates each instantiated matrix clockwise by 90 degrees.
-
-### dim0_flip
-
-~~~text
-dims > 0
-dtype unrestricted
-~~~
-
-Reverses values along axis 0.
-
-### dim1_flip
-
-~~~text
-dims > 1
-dtype unrestricted
-~~~
-
-Reverses values along axis 1.
-
-### dim2_flip
-
-~~~text
-dims > 2
-dtype unrestricted
-~~~
-
-Reverses values along axis 2.
-
-### partition_bool_trim
-
-~~~text
-source_count: 1
-dtype: bool
-dims > 0
-partition: and
-output_count: 2
-~~~
-
-The operation is valid only when every training sample has at least one
-all-False first or last boundary slice along at least one dimension.
-
-For each sample it computes the tight N-dimensional bounding box containing all
-True entries.
-
-It produces:
-
-~~~text
-gene 1: int64 offset vector, one start index per dimension
-gene 2: trimmed boolean structure
-~~~
-
-Examples:
-
-~~~text
-[False, True, True]
-
--> offset  [1]
--> data    [True, True]
-~~~
-
-and:
-
-~~~text
-[
-    [False, False],
-    [False, True]
-]
-
--> offset  [1, 1]
--> data    [[True]]
-~~~
-
-For an all-False source, the offset is all zeros and the remaining structure is
-empty along every dimension.
-
-partition_bool_trim is an AND partition. Reversible unary transforms such as
-rotation and flips are OR partitions and are also SP-legal. Multi-source
-boolean set operations remain NULL/GP-only.
-
-
-## bool_sum
-
-~~~text
-source_count: 1
-dtype: bool
-dims: any
-partition: null/or as appropriate
-output dims: 0
-~~~
-
-Counts every True value in the instantiated source and emits one scalar
-\`np.int64\` per training sample.
-
-Examples:
-
-~~~text
-[True, False, True] -> 2
-
-[[True, True],
- [False, True]] -> 3
-~~~
-
-The operation is GP-only.
-
-## bool_cavity
-
-~~~text
-source_count: 1
-dtype: bool
-dims: any
-requires: at least one True in every sample
-partition: null/or as appropriate
-output shape: identical to source
-~~~
-
-Produces a boolean mask containing only False regions that are fully enclosed
-by True values.
-
-Connectivity is axis-adjacent:
-
-~~~text
-1D -> left/right
-2D -> 4-connectivity
-3D -> 6-connectivity
-N-D -> +/- 1 along one axis at a time
-~~~
-
-A False region is a cavity exactly when it cannot reach any boundary cell
-through axis-adjacent False cells.
-
-Examples:
-
-~~~text
-[False, True, False, True, False]
-
-->
-
-[False, False, True, False, False]
-~~~
-
-~~~text
-[False, True, False, False, True]
-
-->
-
-[False, False, True, True, False]
-~~~
-
-~~~text
-[
-    [False, True,  False],
-    [True,  False, True ],
-    [False, True,  False],
-]
-
-->
-
-[
-    [False, False, False],
-    [False, True,  False],
-    [False, False, False],
-]
-~~~
-
-The center remains a cavity even though it is diagonally adjacent to boundary
-False cells, because diagonal adjacency is not used.
-
-A scalar True is valid and produces scalar False. A source sample containing no
-True values is not generation-valid for bool_cavity.
-
-The operation is GP-only.
-
-
-## Boolean Solution Tree
-
-ST now represents a proof that the complete output can be reconstructed.
-
-Every semantic ST node has two ways to become solved:
-
-1. direct: an exact GP gene is attached through gp_gidx;
-2. derived: one of its Boolean derivation branches evaluates True.
-
-The initial environment is centered on:
-
-~~~text
-root
-  =
-shape
-  AND
-composite
-~~~
-
-Composite is itself:
-
-~~~text
-inv_partition_composite
-AND color_0_id
-AND color_0_presence
-AND color_1_id
-AND color_1_presence
-AND ...
-~~~
-
-The inverse-operation requirements are innate: the transformation code is part
-of the grammar and does not need to be discovered by GP.
-
-### OR transformations
-
-A reversible transform creates an alternative path instead of replacing the
-original target.
-
-If a composite child C is rotated clockwise into R:
-
-~~~text
-C
-OR
-(
-    inv_mat2_cwrotate
-    AND R
-)
-~~~
-
-The direct C target may remain unsolved. If R is solved by a GP gene, the known
-inverse makes C logically solved.
-
-This propagates upward through the Boolean tree.
-
-For example:
-
-~~~text
-shape: solved
-AND
-(
-    composite leaf C: unsolved directly
-    OR
-    (
-        inverse rotate: innately solved
-        AND rotated C: solved
-    )
-)
-~~~
-
-is sufficient to solve the relevant composite branch and therefore the root.
-
-### Partition classes
-
-AND
-: A decomposition whose required outputs are jointly used to explain the
-  source. partition_shape and partition_composite are the initial examples.
-
-OR
-: A reversible alternate representation of one source. bool_complement,
-  mat2_cwrotate, and axis flips are examples.
-
-NULL
-: A transformation that does not create a valid reversible single-source proof
-  branch. Multi-source bool2_union/intersect are NULL. Information-losing
-  bool_sum/bool_cavity are also NULL so ST cannot falsely infer their source
-  from insufficient information.
-
-### Inverse operations
-
-Reverse functions live in:
-
-~~~text
-notebooks/ops/inv_ops.py
-~~~
-
-and are registered in INV_OP_REGISTRY.
-
-Important examples:
-
-~~~python
-inv_partition_shape(h, w, composite)
-inv_partition_composite(color0, mask0, color1, mask1, ...)
-inv_bool_complement(value)
-inv_mat2_cwrotate(value)
-inv_dim0_flip(value)
-inv_dim1_flip(value)
-inv_dim2_flip(value)
-~~~
-
-NULL operations also have relation-checking inverse helpers for completeness,
-but those inverses are marked non-reconstructive and are never used by ST as
-solution branches.
-
-
-## indiv_1dim
-
-~~~text
-source_count: 1
-dims: exactly 1
-dtype: unrestricted
-partition: and
-output_count: dynamic = source length L
-inverse: inv_indiv_1dim
-~~~
-
-indiv_1dim splits a one-dimensional gene into one scalar gene per element
-position.
-
-~~~text
-[a, b, c]
-
--> scalar a
--> scalar b
--> scalar c
-~~~
-
-Every training sample must have the same 1D length so generated position k has
-the same semantic meaning across all samples.
-
-On SP this creates the proof alternative:
-
-~~~text
-source
-OR
-(
-    inv_indiv_1dim
-    AND element_0
-    AND element_1
-    AND ...
-    AND element_L-1
-)
-~~~
-
-Therefore all generated element genes are jointly required to reconstruct the
-source through the known inverse.
-
-inv_indiv_1dim simply reassembles the scalar elements in positional order into
-the original 1D NumPy array.
-
-
-## Unresolved ST frontier
-
-Use:
-
-~~~python
-frontier = get_ST_unsovled_frontier(
-    ST,
-    SP_X,
     min_dim=None,
     max_dim=None,
-)
-~~~
-
-to retrieve the instantiated SP data that still represents unresolved concrete
-solution-tree nodes.
-
-The return value is always a 1D NumPy object array:
-
-~~~text
-frontier.shape == (L,)
-frontier.dtype == object
-~~~
-
-Each entry is one complete SP gene across all training samples, equivalent to:
-
-~~~python
-SP_X[sp_gidx]
-~~~
-
-for that frontier node.
-
-Logical helper nodes such as shape and composite are not returned because they
-do not have instantiated SP data.
-
-The traversal keeps unresolved concrete parents even when they also have OR
-alternatives. For example:
-
-~~~text
-C
-OR
-(
-    inv_rotate
-    AND R
-)
-~~~
-
-places both C and R in the unresolved frontier until C becomes solved through
-either route.
-
-Once a node is solved, its entire proof subtree is pruned from the frontier.
-
-Dimension filters are inclusive:
-
-~~~python
-# scalar int/float/bool genes only
-get_ST_unsovled_frontier(
-    ST,
-    SP_X,
-    min_dim=0,
-    max_dim=0,
-)
-
-# matrices only
-get_ST_unsovled_frontier(
-    ST,
-    SP_X,
-    min_dim=2,
-    max_dim=2,
-)
-
-# all 1D and higher data
-get_ST_unsovled_frontier(
-    ST,
-    SP_X,
-    min_dim=1,
-)
-~~~
-
-The exact requested name get_ST_unsovled_frontier is retained. A correctly
-spelled alias, get_ST_unsolved_frontier, is exported as well.
-
-
-## Typed computation pools
-
-The SP frontier and GP search pool now share the same retrieval filters:
-
-~~~text
-min_dim
-max_dim
-dtype
-~~~
-
-### ST frontier
-
-~~~python
-target_pool = get_ST_unsovled_frontier(
-    ST,
-    SP_X,
-    min_dim=2,
-    max_dim=2,
-    dtype=bool,
-)
-~~~
-
-returns unresolved 2D boolean SP targets only.
-
-Use dtype=None to keep every datatype:
-
-~~~python
-scalar_targets = get_ST_unsovled_frontier(
-    ST,
-    SP_X,
-    min_dim=0,
-    max_dim=0,
     dtype=None,
 )
 ~~~
 
-### GP pool
+## ST frontier
 
 ~~~python
-candidate_pool = get_GP_pool(
-    GP_meta,
-    GP_X,
-    min_dim=2,
-    max_dim=2,
-    dtype=bool,
+ST_frontier = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=None,
+    max_dim=None,
+    dtype=None,
 )
 ~~~
 
-returns every currently instantiated GP gene that is 2D boolean data.
-
-With no filters:
+The correctly spelled alias is also available:
 
 ~~~python
-candidate_pool = get_GP_pool(
+get_ST_unsolved_frontier(...)
+~~~
+
+Examples:
+
+~~~python
+# every scalar candidate, any dtype
+get_GP_pool(
     GP_meta,
     GP_X,
+    min_dim=0,
+    max_dim=0,
 )
-~~~
 
-the complete current GP program pool is returned.
-
-### dtype semantics
-
-dtype is normalized through NumPy, so these are equivalent boolean filters:
-
-~~~python
-dtype=bool
-dtype=np.bool_
-dtype="bool"
-~~~
-
-Likewise:
-
-~~~python
-dtype=np.int64
-dtype="int64"
-~~~
-
-select int64 genes.
-
-The filter applies to the atomic instantiated datatype across the complete gene
-and all training samples. A gene is selected only when its observed atomic dtype
-is exactly the requested dtype.
-
-### Matching workflow
-
-These helpers are intended to define the actual computation/evaluation pools.
-
-For example:
-
-~~~python
-targets = get_ST_unsovled_frontier(
+# unresolved 2D boolean targets only
+get_ST_unsovled_frontier(
     ST,
     SP_X,
     min_dim=2,
     max_dim=2,
     dtype=bool,
 )
-
-candidates = get_GP_pool(
-    GP_meta,
-    GP_X,
-    min_dim=2,
-    max_dim=2,
-    dtype=bool,
-)
 ~~~
 
-now gives two structurally compatible collections:
+Solved ST subtrees are pruned.
+
+For an unresolved OR relation, both the original target and transformed target may remain candidates until one route solves the parent.
+
+---
+
+# 10. Exact semantic matching
+
+The current solvers are ordered symbolic searches, not statistical regressors.
+
+Training error is binary:
 
 ~~~text
-unresolved 2D bool SP targets
-versus
-available 2D bool GP genes
+zero residual       candidate
+non-zero residual   reject
 ~~~
 
-which can be passed directly into the later exact solution-matching layer.
+Among zero-residual candidates, lower-complexity rule families are preferred.
 
-
-## Exact 0D one-gene solving
-
-The first scalar solver is:
+## Scalar one-gene solver
 
 ~~~python
-solutions = solve_0dim_1gene_basic(
+solve_0dim_1gene_basic(
     GP_pool,
     ST_frontier,
     GP_X=GP_X,
@@ -1199,13 +621,7 @@ solutions = solve_0dim_1gene_basic(
 )
 ~~~
 
-It expects GP_pool and ST_frontier to contain only 0D genes.
-
-The solver is not a statistical regressor. It searches an explicit
-minimum-complexity symbolic hierarchy and accepts only exact zero-residual
-relationships across every training sample.
-
-Search order:
+Search hierarchy:
 
 ~~~text
 0  y = x
@@ -1218,55 +634,232 @@ Search order:
 7  y = a*x + b
 ~~~
 
-x-c is already represented by x+c with a negative constant. x/c is represented
-by scaling with a reciprocal constant.
+One-parameter fitted rules require at least two samples. Affine fitting requires at least three samples and at least two distinct source values.
 
-One-parameter fitted rules require at least two training samples.
-
-The affine rule requires at least three samples and at least two distinct
-source values, preventing the trivial two-point line interpolation case.
-
-Every candidate must match the frontier target exactly across every sample.
-The target scalar dtype is retained and recorded in the returned solution.
-
-Successful solves are written directly into ST:
-
-~~~text
-gp_gidx
-solution_rule
-solution_params
-~~~
-
-so ST can distinguish:
-
-~~~text
-target solved by GP gene 17 through y = x
-~~~
-
-from:
-
-~~~text
-target solved by GP gene 17 through y = x + 2
-~~~
-
-The returned Scalar1GeneSolution objects expose:
-
-~~~text
-sp_gidx
-gp_gidx
-rule
-params
-target_dtype
-complexity_level
-expression
-~~~
-
-Within one rule family, simpler fitted constants are preferred, followed by
-lower GP gene index. Rule-complexity level always dominates those tie-breakers.
-
-A typical notebook flow is:
+## 2D one-gene solver
 
 ~~~python
+solve_2dim_1gene_basic(
+    GP_pool,
+    ST_frontier,
+    GP_X=GP_X,
+    SP_X=SP_X,
+    ST=ST,
+)
+~~~
+
+Search hierarchy:
+
+~~~text
+0  identity
+1  structural zero-background embedding
+2  fixed zero-background embedding
+3  structural crop
+4  fixed crop
+5  zero-fill translation
+6  integer tiling
+~~~
+
+Structural positions include top-left, top-right, bottom-left, bottom-right, and center.
+
+Containment alone is not a solution. A spatial rule must reconstruct the complete target exactly across every training sample.
+
+Successful matches update ST immediately.
+
+---
+
+# 11. Minimum-complexity principle
+
+The current solver policy is:
+
+> Search the least expressive exact hypothesis class first.
+
+For example:
+
+~~~text
+y = x
+~~~
+
+is preferred over:
+
+~~~text
+y = x + c
+~~~
+
+which is preferred over:
+
+~~~text
+y = a*x + b
+~~~
+
+when a simpler family already achieves exact agreement.
+
+This is intended to reduce trivial interpolation and meaningless explanations in ARC's small training sets.
+
+The same principle should guide future multi-gene, object-level, and higher-dimensional matching.
+
+---
+
+# 12. Kelschinator
+
+Kelschinator turns a fully solved Boolean proof into an executable symbolic program.
+
+~~~python
+kelschinator = Kelschinator()
+
+fit_success = kelschinator.fit(ST)
+~~~
+
+fit returns False when:
+
+- ST is not fully solved;
+- ST lacks its bound GP/SP environment;
+- a selected proof branch is not reconstructive;
+- a required GP operation cannot be replayed;
+- a retained symbolic matching rule is not executable;
+- the distilled program fails exact training replay.
+
+A Boolean solved state is therefore necessary but not sufficient.
+
+**Executability is part of correctness.**
+
+## Distillation
+
+A successful fit:
+
+1. chooses a satisfied root proof;
+2. follows only required Boolean branches;
+3. identifies direct GP-backed ST nodes;
+4. traces their GP source dependencies;
+5. freezes only those GP operations;
+6. freezes retained symbolic solution rules;
+7. freezes required inverse reconstruction operations;
+8. replays the compiled program on every training pair.
+
+The result is a specific executable program rather than the full search graph.
+
+## Training replay
+
+For every training sample:
+
+~~~text
+compiled_program(input_i) == output_i
+~~~
+
+must hold exactly, including shape and dtype.
+
+Only then:
+
+~~~python
+kelschinator.is_fitted_
+~~~
+
+becomes True.
+
+## Test transformation
+
+~~~python
+y_hat = kelschinator.transform(X_test)
+~~~
+
+currently accepts one 2D input matrix and returns one reconstructed 2D output matrix.
+
+Useful fields:
+
+~~~python
+kelschinator.is_fitted_
+kelschinator.last_error_
+kelschinator.pipeline_
+~~~
+
+The fitted Kelschinator no longer depends on later changes to ST's solved state.
+
+---
+
+# 13. End-to-end lifecycle
+
+~~~text
+1. init_env
+   |
+   v
+GP / SP / ST
+   |
+   +-----------------------------------------------+
+   |                                               |
+   v                                               v
+2. grow GP                                    3. grow SP
+   |                                               |
+   v                                               v
+candidate semantics                       reversible target semantics
+   |                                               |
+   +-----------------------+-----------------------+
+                           |
+                           v
+4. retrieve typed GP pool and unresolved ST frontier
+                           |
+                           v
+5. run exact minimum-complexity symbolic matching
+                           |
+                           v
+6. write direct solutions into ST
+                           |
+                           v
+7. Boolean propagation
+                           |
+                      ST.solved?
+                    /            \
+                  no              yes
+                  |                |
+                  v                v
+          continue search    8. Kelschinator.fit(ST)
+                                   |
+                                   v
+                         exact training replay
+                                   |
+                              fit succeeds?
+                             /            \
+                           no              yes
+                           |                |
+                           v                v
+                    continue search   9. transform(test_input)
+~~~
+
+This is the current meaning of bidirectional symbolic program synthesis in the project.
+
+---
+
+# 14. Minimal notebook example
+
+~~~python
+from notebooks.ops import (
+    GP_generate,
+    SP_generate,
+    Kelschinator,
+    get_GP_pool,
+    get_ST_unsovled_frontier,
+    init_env,
+    solve_0dim_1gene_basic,
+    solve_2dim_1gene_basic,
+)
+
+
+GP_meta, GP_X, SP_meta, SP_X, ST = init_env(task.train)
+
+GP_generate(
+    GP_meta,
+    GP_X,
+    n_new_genes=10,
+    rng=42,
+)
+
+SP_generate(
+    SP_meta,
+    SP_X,
+    ST,
+    rng=42,
+)
+
+
 GP_pool_0d = get_GP_pool(
     GP_meta,
     GP_X,
@@ -1281,82 +874,102 @@ ST_frontier_0d = get_ST_unsovled_frontier(
     max_dim=0,
 )
 
-solutions = solve_0dim_1gene_basic(
+solve_0dim_1gene_basic(
     GP_pool_0d,
     ST_frontier_0d,
     GP_X=GP_X,
     SP_X=SP_X,
     ST=ST,
 )
-~~~
 
 
-## Exact 2D one-gene spatial solver
+GP_pool_2d = get_GP_pool(
+    GP_meta,
+    GP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
 
-~~~python
-solutions_2d = solve_2dim_1gene_basic(
+ST_frontier_2d = get_ST_unsovled_frontier(
+    ST,
+    SP_X,
+    min_dim=2,
+    max_dim=2,
+    dtype=bool,
+)
+
+solve_2dim_1gene_basic(
     GP_pool_2d,
     ST_frontier_2d,
     GP_X=GP_X,
     SP_X=SP_X,
     ST=ST,
 )
+
+
+kelschinator = Kelschinator()
+
+if kelschinator.fit(ST):
+    y_hat = kelschinator.transform(
+        task.test[0].input
+    )
 ~~~
 
-This is the 2D analogue of solve_0dim_1gene_basic. It is an exact symbolic
-matcher rather than a statistical image model.
+The orchestration policy around generation, frontier prioritization, and solver scheduling remains experimental.
 
-The ordered rule hierarchy is:
+---
+
+# 15. Current invariants
+
+## Gene semantic consistency
+
+One gene index retains one meaning across all training samples.
+
+## Exactness
+
+A solution relationship must match all demonstrations exactly.
+
+## Dtype preservation
+
+Matching and reconstruction preserve target dtype unless an exact safe conversion is part of the retained rule.
+
+## Reconstructivity
+
+A proof solves a target only when enough information exists to reconstruct that target.
+
+## Boolean transparency
+
+The reason a target is solved remains inspectable through ST.
+
+## Search/program separation
+
+The search graph may be large. The final Kelschinator retains only the program needed by the selected proof.
+
+## Training replay
+
+A distilled solution is not accepted unless it exactly reproduces all training outputs.
+
+---
+
+# 16. Research direction
+
+The architecture now separates several research problems cleanly:
 
 ~~~text
-0  identity
-   Y = X
-
-1  structural zero-background embedding
-   top_left
-   top_right
-   bottom_left
-   bottom_right
-   center
-
-2  fixed zero-background embedding
-   embed X at the same (row, col) in every sample
-
-3  structural crop
-   crop from a named structural position
-
-4  fixed crop
-   crop from the same (row, col) in every sample
-
-5  zero-fill translation
-   shift X by fixed (dr, dc) on the same-size canvas
-
-6  integer tiling
-   tile X by fixed (rows, cols)
+operation grammar design
+GP generation policy
+SP decomposition policy
+frontier prioritization
+multi-gene exact matching
+object-level relationships
+solution complexity accounting
+proof-path ranking
+search-budget allocation
+program simplification
+generalization testing
 ~~~
 
-"Zero background" means False for boolean matrices and numeric zero for numeric
-matrices, represented in the target dtype.
+The guiding principle is:
 
-Containment alone is never accepted. For an embedding rule, every cell outside
-the embedded GP matrix must equal the zero background so the full SP matrix is
-reconstructed exactly.
-
-All candidate rules must match every training sample with zero residual.
-
-Fixed coordinate rules and shifts require at least two training samples.
-Structural relationships and tiling can be accepted directly from their
-geometry.
-
-The frontier target dtype is retained. A source matrix may only be converted to
-the target dtype when that conversion preserves every source value exactly.
-
-Successful matches update ST with:
-
-~~~text
-gp_gidx
-solution_rule
-solution_params
-~~~
-
-and return Matrix1GeneSolution records.
+> **Grow symbolic possibilities forward from the input, grow reconstructive requirements backward from the output, connect them through the simplest exact semantic relationships available, and compile the satisfied proof into an executable program.**
