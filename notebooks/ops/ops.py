@@ -1879,13 +1879,6 @@ def _try_candidate_transactionally(
     return new_indices, None
 
 
-def _generation_exhausted_message(side: str) -> str:
-    return (
-        f"{side} generation terminated: entire legal generation space was "
-        "explored and no additional unique genes can be generated."
-    )
-
-
 def _stochastic_failure_message(
     side: str,
     consecutive_failures: int,
@@ -2075,6 +2068,3 @@ def SP_generate(
     )
     return []
 
-
-    print(_generation_exhausted_message("SP"))
-    return []
