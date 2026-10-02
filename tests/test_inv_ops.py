@@ -14,6 +14,7 @@ from notebooks.ops.inv_ops import (
     inv_dim2_flip,
     inv_indiv_1dim,
     inv_mat2_cwrotate,
+    inv_partition_bool_subjects,
     inv_partition_bool_trim,
     inv_partition_composite,
     inv_partition_shape,
@@ -36,6 +37,7 @@ def test_inverse_registry_distinguishes_reconstructive_and_null_relations():
 
     assert not INV_OP_REGISTRY["inv_bool_sum"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool_mat_ident"].reconstructive
+    assert not INV_OP_REGISTRY["inv_partition_bool_subjects"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool_cavity"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool2_union"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool2_intersect"].reconstructive
@@ -185,7 +187,8 @@ def test_inv_partition_bool_trim_reconstructs_when_shape_is_known():
     )
 
     result = inv_partition_bool_trim(
-        np.array([1, 2], dtype=np.int64),
+        np.int64(1),
+        np.int64(2),
         trimmed,
         np.array([4, 5], dtype=np.int64),
     )
@@ -194,6 +197,36 @@ def test_inv_partition_bool_trim_reconstructs_when_shape_is_known():
     expected[1:3, 2:4] = trimmed
 
     assert np.array_equal(result, expected)
+
+
+def test_inv_partition_bool_subjects_verifies_complete_subject_cover():
+    source = np.array(
+        [
+            [True, True, False, False],
+            [False, False, False, True],
+        ],
+        dtype=bool,
+    )
+
+    recovered = inv_partition_bool_subjects(
+        np.int64(0),
+        np.int64(0),
+        np.array([[True, True]], dtype=bool),
+        np.int64(1),
+        np.int64(3),
+        np.array([[True]], dtype=bool),
+        source,
+    )
+
+    assert np.array_equal(recovered, source)
+
+    with pytest.raises(ValueError, match="inverse check failed"):
+        inv_partition_bool_subjects(
+            np.int64(0),
+            np.int64(0),
+            np.array([[True]], dtype=bool),
+            source,
+        )
 
 
 def test_null_inverse_helpers_verify_relations_but_do_not_create_st_proofs():
