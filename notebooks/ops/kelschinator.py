@@ -315,6 +315,7 @@ class Kelschinator:
                     x_train,
                     instructions,
                     memo,
+                    {},
                 )
                 y_true = np.asarray(
                     SP_X[0, sample_idx]
@@ -360,6 +361,7 @@ class Kelschinator:
             self._root_plan,
             X.copy(),
             self._gp_instructions,
+            {},
             {},
         )
 
@@ -409,6 +411,8 @@ class Kelschinator:
                     params,
                     GP_X[node.gp_gidx],
                     target_gene,
+                    root_gene=SP_X[0],
+                    is_root=(node.sp_gidx == 0),
                 )
 
             return _DirectPlan(
@@ -773,6 +777,7 @@ class Kelschinator:
         X_input: np.ndarray,
         instructions: dict[int, _GPInstruction],
         memo: dict[int, Any],
+        context: dict[str, Any],
     ) -> Any:
         if isinstance(plan, _DirectPlan):
             source = self._eval_gp_gene(
@@ -784,6 +789,7 @@ class Kelschinator:
             return self._apply_solution_rule(
                 source,
                 plan,
+                context,
             )
 
         if isinstance(plan, _BundlePlan):
