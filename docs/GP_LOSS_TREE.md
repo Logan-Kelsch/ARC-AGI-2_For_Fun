@@ -1,4 +1,10 @@
-# GP loss tree
+# GP Loss Tree — Legacy Reference
+
+> **Legacy architecture:** this document describes the earlier descriptive GP loss-tree experiment. It remains available for reference but does **not** define current solution status or the active solver architecture.
+>
+> Current solution state is represented by the Boolean SolutionTree and compiled through Kelschinator. See docs/ARCHITECTURE.md and docs/GP_SP_ENVIRONMENT.md.
+
+---
 
 The loss tree is a descriptive view of how current prediction states transition
 to target states across the training demonstrations.

@@ -1,4 +1,10 @@
-# GP_Set evaluation tree
+# GP_Set Evaluation Tree — Legacy Reference
+
+> **Legacy architecture:** this document describes the earlier GP_Set evaluation-tree design. It is retained for historical/reference purposes and is **not** the current solving path.
+>
+> The current architecture uses GP_meta / GP_X, SP_meta / SP_X, the Boolean SolutionTree, exact typed frontier matching, and Kelschinator program distillation. See docs/ARCHITECTURE.md and docs/GP_SP_ENVIRONMENT.md.
+
+---
 
 The GP_Set evaluation tree is persistent bookkeeping for incrementally
 constricting the output solution space as the gene matrix grows.
