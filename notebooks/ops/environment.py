@@ -1367,6 +1367,8 @@ def _init_raw_program(
 
 def init_env(
     grid_set: Iterable[Any],
+    *,
+    select_residual_max_destinations: int = 5,
 ) -> tuple[ProgramMeta, ProgramX, ProgramMeta, ProgramX, SolutionTree]:
     """Initialize GP_meta, GP_X, SP_meta, SP_X, and ST.
 
@@ -1374,19 +1376,15 @@ def init_env(
       GP gene 0 = input matrix
       SP gene 0 = output matrix
 
-    Then both sides receive the default AND-partition operations:
-      genes 1-2 = partition_shape(gene 0): h, w
-      genes 3.. = partition_composite(gene 0)
+    Both sides receive the default shape/composite partitions.
 
-    partition_composite creates two genes per distinct color observed across
-    the complete sample set: one scalar int64 color ID and one 2D boolean
-    presence mask.
+    SP additionally receives an input-relative select-residual decomposition
+    when every training input/output pair has aligned shape and no source color
+    exceeds select_residual_max_destinations distinct output destinations.
 
-    ST begins as a boolean proof:
-        root = shape AND composite
-
-    Later SP transformations may add reversible OR/AND alternatives. NULL
-    partition operations are GP-only.
+    The select-residual representation is attached as an OR alternative at the
+    output root.  It materializes shared residual-support masks for destination
+    subsets and lets ST recursively choose the base paint layer.
     """
     grid_set = list(grid_set)
 
@@ -1415,7 +1413,11 @@ def init_env(
 
     # Local import avoids a module cycle: operations work on ProgramMeta/X,
     # while init_env is responsible for choosing the default operation sequence.
-    from .ops import partition_composite, partition_shape
+    from .ops import (
+        partition_composite,
+        partition_select_residual,
+        partition_shape,
+    )
 
     partition_shape(GP_meta, GP_X, 0)
     partition_composite(GP_meta, GP_X, 0)
@@ -1431,11 +1433,39 @@ def init_env(
     shape_gidxs = partition_shape(SP_meta, SP_X, 0)
     composite_gidxs = partition_composite(SP_meta, SP_X, 0)
 
+    select_residual = partition_select_residual(
+        SP_meta,
+        SP_X,
+        inputs,
+        0,
+        max_destinations=select_residual_max_destinations,
+    )
+
     ST.sync(SP_meta)
     ST.initialize_output_partition(
         shape_gidxs=shape_gidxs,
         composite_gidxs=composite_gidxs,
     )
+
+    if select_residual is not None:
+        color_gidx_by_value: dict[int, int] = {}
+
+        for pair_index in range(0, len(composite_gidxs), 2):
+            color_gidx = composite_gidxs[pair_index]
+            color_value = int(
+                np.asarray(SP_X[color_gidx, 0]).item()
+            )
+            color_gidx_by_value[color_value] = color_gidx
+
+        ST.initialize_select_residual(
+            SP_meta,
+            source_destinations=(
+                select_residual.source_destinations
+            ),
+            support_gidxs=select_residual.support_gidxs,
+            color_gidx_by_value=color_gidx_by_value,
+        )
+
     ST.bind_environment(GP_meta, GP_X, SP_X)
 
     return GP_meta, GP_X, SP_meta, SP_X, ST
