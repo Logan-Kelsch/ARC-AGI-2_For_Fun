@@ -900,10 +900,10 @@ class Kelschinator:
             "embed_zero_structural",
             "embed_zero_fixed",
         }:
-            dh, dw = params["shape_delta"]
-            target_shape = (
-                x.shape[0] + int(dh),
-                x.shape[1] + int(dw),
+            target_shape = self._target_shape_for_rule(
+                x.shape,
+                params,
+                context,
             )
 
             if target_shape[0] < 0 or target_shape[1] < 0:
@@ -946,10 +946,10 @@ class Kelschinator:
             "crop_structural",
             "crop_fixed",
         }:
-            dh, dw = params["shape_delta"]
-            target_shape = (
-                x.shape[0] + int(dh),
-                x.shape[1] + int(dw),
+            target_shape = self._target_shape_for_rule(
+                x.shape,
+                params,
+                context,
             )
 
             if target_shape[0] < 0 or target_shape[1] < 0:
@@ -1008,6 +1008,9 @@ class Kelschinator:
         params: dict[str, Any],
         gp_gene: np.ndarray,
         sp_gene: np.ndarray,
+        *,
+        root_gene: np.ndarray,
+        is_root: bool,
     ) -> dict[str, Any]:
         params = dict(params)
 
@@ -1020,10 +1023,10 @@ class Kelschinator:
             return params
 
         deltas = set()
+        matches_root_shape = not is_root
 
-        for x_value, y_value in zip(
-            gp_gene,
-            sp_gene,
+        for sample_idx, (x_value, y_value) in enumerate(
+            zip(gp_gene, sp_gene)
         ):
             x = np.asarray(x_value)
             y = np.asarray(y_value)
@@ -1033,6 +1036,10 @@ class Kelschinator:
                     f"2D solution rule {rule!r} received non-2D training data."
                 )
 
+            root_value = np.asarray(root_gene[sample_idx])
+            if y.shape != root_value.shape:
+                matches_root_shape = False
+
             deltas.add(
                 (
                     y.shape[0] - x.shape[0],
@@ -1040,13 +1047,47 @@ class Kelschinator:
                 )
             )
 
+        if matches_root_shape:
+            params["_target_shape_mode"] = "root"
+            return params
+
         if len(deltas) != 1:
             raise KelschinatorCompileError(
-                f"2D rule {rule!r} has no single executable shape delta."
+                f"2D rule {rule!r} has neither root-shape semantics "
+                "nor one executable shape delta."
             )
 
+        params["_target_shape_mode"] = "delta"
         params["shape_delta"] = next(iter(deltas))
         return params
+
+    def _target_shape_for_rule(
+        self,
+        source_shape: tuple[int, int],
+        params: dict[str, Any],
+        context: dict[str, Any],
+    ) -> tuple[int, int]:
+        mode = params.get("_target_shape_mode", "delta")
+
+        if mode == "root":
+            shape = context.get("root_output_shape")
+            if shape is None:
+                raise RuntimeError(
+                    "A 2D solution requires the solved root output shape "
+                    "before it can be reconstructed."
+                )
+            return (int(shape[0]), int(shape[1]))
+
+        if mode != "delta":
+            raise RuntimeError(
+                f"Unknown target-shape mode {mode!r}."
+            )
+
+        dh, dw = params["shape_delta"]
+        return (
+            source_shape[0] + int(dh),
+            source_shape[1] + int(dw),
+        )
 
     def _gene_dtype(
         self,
