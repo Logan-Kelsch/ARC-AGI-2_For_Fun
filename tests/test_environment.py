@@ -2362,7 +2362,10 @@ def test_partition_bool_subjects_o_with_center_dot_is_two_subjects():
 
     assert X[outer_y, 0] == np.int64(0)
     assert X[outer_x, 0] == np.int64(0)
-    assert np.array_equal(X[outer_mask, 0], source)
+
+    expected_outer = source.copy()
+    expected_outer[2, 2] = False
+    assert np.array_equal(X[outer_mask, 0], expected_outer)
 
     assert X[dot_y, 0] == np.int64(2)
     assert X[dot_x, 0] == np.int64(2)
