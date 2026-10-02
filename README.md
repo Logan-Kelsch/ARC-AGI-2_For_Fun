@@ -814,7 +814,11 @@ notebooks/ops/
 └── alpha_ops.py
 
 docs/
-└── GP_SP_ENVIRONMENT.md
+├── ARCHITECTURE.md        high-level current architecture
+├── GP_SP_ENVIRONMENT.md   detailed current GP/SP/ST specification
+├── GP_EVAL_TREE.md        legacy GP_Set evaluation-tree reference
+├── GP_LOSS_TREE.md        legacy descriptive loss-tree reference
+└── KAGGLE.md
 ~~~
 
 New architecture work should generally target:
@@ -826,6 +830,24 @@ inv_ops.py
 solve.py
 kelschinator.py
 ~~~
+
+---
+
+## Architecture documentation
+
+For the current system overview:
+
+~~~text
+docs/ARCHITECTURE.md
+~~~
+
+For the detailed implementation model, proof semantics, generation rules, matching layer, and Kelschinator lifecycle:
+
+~~~text
+docs/GP_SP_ENVIRONMENT.md
+~~~
+
+The GP_Set evaluation-tree and loss-tree documents are retained as explicitly labeled legacy references.
 
 ---
 
