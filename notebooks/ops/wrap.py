@@ -19,7 +19,7 @@ from .environment import (
     init_env,
 )
 from .kelschinator import Kelschinator
-from .ops import GP_generate, SP_generate
+from .ops import GP_generate, GP_prune, SP_generate
 from .solve import (
     solve_0dim_1gene_basic,
     solve_2dim_1gene_basic,
@@ -527,3 +527,195 @@ def synth(
         _operation_application_count(SP_meta),
         iterations,
     )
+
+def synth_v2(
+    task_id: str,
+    max_GP: int = 1000,
+    max_SP: int = 1000,
+    gen_size_GP: int = 10,
+    prune_size_GP: int = 5,
+    *,
+    rng: np.random.Generator | int | None = None,
+    data_root: str | Path | None = None,
+    split: str | None = None,
+    select_residual_max_destinations: int = 5,
+    verbosity: int = 0,
+) -> tuple[
+    bool,
+    Kelschinator,
+    int,
+    int,
+    int,
+    int,
+    int,
+]:
+    """Run synthesis with probabilistic GP generation and pruning.
+
+    This follows synth()'s search loop and return contract, with one additional
+    per-GP-growth control:
+
+    prune_size_GP:
+        Number of GP genes requested from GP_prune after each successful GP
+        generation iteration. Default is 5.
+
+    Iteration order is:
+
+        GP generation
+        SP generation
+        solve current ST frontier
+        GP pruning
+
+    Solving occurs before pruning so any newly useful GP gene is first recorded
+    in ST. GP_prune then protects that solver and its complete GP dependency
+    closure before selecting expendable leaves.
+
+    Setting prune_size_GP=0 disables pruning and recovers synth()'s loop
+    behavior while retaining the v2 entry point.
+
+    Note that max_GP remains a live GP-size ceiling. If pruning keeps the live
+    GP pool below that ceiling, max_GP alone may no longer bound the number of
+    iterations; generation exhaustion or SP exhaustion/limits still apply.
+    """
+    for name, value in (
+        ("max_GP", max_GP),
+        ("max_SP", max_SP),
+        ("gen_size_GP", gen_size_GP),
+        ("prune_size_GP", prune_size_GP),
+    ):
+        if isinstance(value, bool) or int(value) < 0:
+            raise ValueError(
+                f"{name} must be a non-negative integer."
+            )
+
+    max_GP = int(max_GP)
+    max_SP = int(max_SP)
+    gen_size_GP = int(gen_size_GP)
+    prune_size_GP = int(prune_size_GP)
+
+    if isinstance(verbosity, bool) or verbosity not in {0, 1, 2}:
+        raise ValueError("verbosity must be one of 0, 1, or 2.")
+
+    if gen_size_GP == 0 and max_GP > 0:
+        gp_exhausted = True
+    else:
+        gp_exhausted = False
+
+    sp_exhausted = False
+
+    task = _load_task_by_id(
+        task_id,
+        data_root=data_root,
+        split=split,
+    )
+
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(
+        task.train,
+        select_residual_max_destinations=(
+            select_residual_max_destinations
+        ),
+    )
+
+    rng = (
+        rng
+        if isinstance(rng, np.random.Generator)
+        else np.random.default_rng(rng)
+    )
+
+    iterations = 0
+
+    _solve_frontier(
+        GP_meta,
+        GP_X,
+        SP_X,
+        ST,
+    )
+
+    while not ST.solved:
+        can_grow_gp = (
+            not gp_exhausted
+            and len(GP_X) < max_GP
+        )
+        can_grow_sp = (
+            not sp_exhausted
+            and len(SP_X) < max_SP
+        )
+
+        if not can_grow_gp and not can_grow_sp:
+            break
+
+        iterations += 1
+        iteration_started = perf_counter()
+        generated_gp: list[int] = []
+
+        if can_grow_gp:
+            generated_gp = GP_generate(
+                GP_meta,
+                GP_X,
+                n_new_genes=gen_size_GP,
+                rng=rng,
+            )
+
+            if not generated_gp:
+                gp_exhausted = True
+
+        if can_grow_sp and not ST.solved:
+            generated_sp = SP_generate(
+                SP_meta,
+                SP_X,
+                ST,
+                rng=rng,
+            )
+
+            if not generated_sp:
+                sp_exhausted = True
+
+        _solve_frontier(
+            GP_meta,
+            GP_X,
+            SP_X,
+            ST,
+        )
+
+        if (
+            generated_gp
+            and prune_size_GP > 0
+            and not ST.solved
+        ):
+            GP_prune(
+                GP_meta,
+                GP_X,
+                ST,
+                prune=prune_size_GP,
+                rng=rng,
+            )
+
+        _print_iteration_status(
+            verbosity=verbosity,
+            iteration=iterations,
+            elapsed_seconds=(
+                perf_counter() - iteration_started
+            ),
+            ST=ST,
+            GP_X=GP_X,
+            SP_X=SP_X,
+        )
+
+    kelschinator = Kelschinator()
+    solved_exactly = False
+
+    if ST.solved and kelschinator.fit(ST):
+        solved_exactly = _exact_test_match(
+            task,
+            kelschinator,
+        )
+
+    return (
+        solved_exactly,
+        kelschinator,
+        len(GP_X),
+        len(SP_X),
+        _operation_application_count(GP_meta),
+        _operation_application_count(SP_meta),
+        iterations,
+    )
+
