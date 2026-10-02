@@ -5,8 +5,9 @@ import json
 import numpy as np
 import pytest
 
-from notebooks.ops import synth
+from notebooks.ops import synth, synth_v2
 from notebooks.ops.environment import ProgramMeta, init_env
+import notebooks.ops.wrap as wrap_module
 from notebooks.ops.wrap import (
     _operation_application_count,
     _print_iteration_status,
@@ -297,3 +298,241 @@ def test_synth_rejects_invalid_verbosity_before_task_loading():
         match="verbosity must be one of 0, 1, or 2",
     ):
         synth("does-not-matter", verbosity=3)
+
+def test_synth_v2_identity_matches_synth_without_entering_loop(tmp_path):
+    task_id = "identity_task_v2"
+
+    _write_task(
+        tmp_path,
+        task_id,
+        train=[
+            {
+                "input": [[0, 1], [1, 0]],
+                "output": [[0, 1], [1, 0]],
+            },
+            {
+                "input": [[2, 0, 2]],
+                "output": [[2, 0, 2]],
+            },
+        ],
+        test=[
+            {
+                "input": [[3, 0], [0, 3]],
+                "output": [[3, 0], [0, 3]],
+            }
+        ],
+    )
+
+    result = synth_v2(
+        task_id,
+        max_GP=100,
+        max_SP=100,
+        gen_size_GP=5,
+        prune_size_GP=5,
+        data_root=tmp_path,
+        split="training",
+        rng=0,
+    )
+
+    solved_exactly, kelschinator, *_, iterations = result
+
+    assert solved_exactly
+    assert kelschinator.is_fitted_
+    assert iterations == 0
+
+
+def test_synth_v2_solves_before_pruning_each_gp_growth_iteration(
+    tmp_path,
+    monkeypatch,
+):
+    task_id = "synth_v2_order_task"
+
+    _write_task(
+        tmp_path,
+        task_id,
+        train=[
+            {
+                "input": [[1, 2], [3, 4]],
+                "output": [[4, 3], [2, 1]],
+            },
+            {
+                "input": [[5, 6], [7, 8]],
+                "output": [[8, 7], [6, 5]],
+            },
+        ],
+        test=[
+            {
+                "input": [[9, 0], [1, 2]],
+                "output": [[2, 1], [0, 9]],
+            }
+        ],
+    )
+
+    events = []
+
+    def fake_solve(GP_meta, GP_X, SP_X, ST):
+        events.append("solve")
+
+    def fake_gp_generate(GP_meta, GP_X, n_new_genes, *, rng=None, **kwargs):
+        events.append("generate")
+        gidx = GP_X.append_gene(
+            [np.int64(123)] * GP_X.sample_count
+        )
+        GP_meta.append(
+            source=1,
+            op="test_synth_v2_generated",
+            dims=0,
+        )
+        return [gidx]
+
+    def fake_gp_prune(GP_meta, GP_X, ST, prune=5, *, rng=None):
+        events.append(("prune", prune))
+        return []
+
+    monkeypatch.setattr(
+        wrap_module,
+        "_solve_frontier",
+        fake_solve,
+    )
+    monkeypatch.setattr(
+        wrap_module,
+        "GP_generate",
+        fake_gp_generate,
+    )
+    monkeypatch.setattr(
+        wrap_module,
+        "GP_prune",
+        fake_gp_prune,
+    )
+
+    # Initial GP has fewer than 100 genes. The fake generation runs once per
+    # iteration, so close the GP side immediately after the first append.
+    original_init_env = wrap_module.init_env
+    initial_sizes = {}
+
+    def recording_init_env(*args, **kwargs):
+        env = original_init_env(*args, **kwargs)
+        initial_sizes["gp"] = len(env[1])
+        return env
+
+    monkeypatch.setattr(
+        wrap_module,
+        "init_env",
+        recording_init_env,
+    )
+
+    # Use an SP ceiling of zero so only the GP side can advance. Setting max_GP
+    # to initial+1 requires resolving the initial size first, so use a small
+    # preflight environment built from the written task.
+    task = wrap_module._load_task_by_id(
+        task_id,
+        data_root=tmp_path,
+        split="training",
+    )
+    preflight = original_init_env(task.train)
+    max_gp = len(preflight[1]) + 1
+
+    result = synth_v2(
+        task_id,
+        max_GP=max_gp,
+        max_SP=0,
+        gen_size_GP=1,
+        prune_size_GP=3,
+        data_root=tmp_path,
+        split="training",
+        rng=0,
+    )
+
+    assert result[-1] == 1
+    assert events == [
+        "solve",
+        "generate",
+        "solve",
+        ("prune", 3),
+    ]
+
+
+def test_synth_v2_zero_prune_size_skips_gp_prune(
+    tmp_path,
+    monkeypatch,
+):
+    task_id = "synth_v2_no_prune_task"
+
+    _write_task(
+        tmp_path,
+        task_id,
+        train=[
+            {
+                "input": [[1, 2], [3, 4]],
+                "output": [[4, 3], [2, 1]],
+            }
+        ],
+        test=[
+            {
+                "input": [[5, 6], [7, 8]],
+                "output": [[8, 7], [6, 5]],
+            }
+        ],
+    )
+
+    calls = []
+
+    monkeypatch.setattr(
+        wrap_module,
+        "_solve_frontier",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_gp_generate(GP_meta, GP_X, n_new_genes, *, rng=None, **kwargs):
+        gidx = GP_X.append_gene(
+            [np.int64(99)] * GP_X.sample_count
+        )
+        GP_meta.append(
+            source=1,
+            op="test_v2_no_prune",
+            dims=0,
+        )
+        return [gidx]
+
+    monkeypatch.setattr(
+        wrap_module,
+        "GP_generate",
+        fake_gp_generate,
+    )
+    monkeypatch.setattr(
+        wrap_module,
+        "GP_prune",
+        lambda *args, **kwargs: calls.append(True),
+    )
+
+    task = wrap_module._load_task_by_id(
+        task_id,
+        data_root=tmp_path,
+        split="training",
+    )
+    initial_gp = len(wrap_module.init_env(task.train)[1])
+
+    synth_v2(
+        task_id,
+        max_GP=initial_gp + 1,
+        max_SP=0,
+        gen_size_GP=1,
+        prune_size_GP=0,
+        data_root=tmp_path,
+        split="training",
+        rng=0,
+    )
+
+    assert calls == []
+
+
+def test_synth_v2_rejects_invalid_prune_size_before_task_loading():
+    with pytest.raises(
+        ValueError,
+        match="prune_size_GP must be a non-negative integer",
+    ):
+        synth_v2(
+            "does-not-matter",
+            prune_size_GP=-1,
+        )
+

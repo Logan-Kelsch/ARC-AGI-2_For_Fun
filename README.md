@@ -848,6 +848,16 @@ Kelschinator must be able to replay the discovered symbolic program and exactly 
 
 ---
 
+## Synthesis v2
+
+synth_v2(...) follows the same bidirectional search loop and return contract as
+synth(...), while adding prune_size_GP=5. After each successful GP growth
+iteration it solves the current ST frontier first, then calls GP_prune on the
+still-unsolved search state. This guarantees newly discovered solver genes are
+protected before pruning.
+
+Setting prune_size_GP=0 disables pruning.
+
 ## GP pruning
 
 GP_prune(GP_meta, GP_X, ST, prune=5, rng=...) removes expendable GP leaves
