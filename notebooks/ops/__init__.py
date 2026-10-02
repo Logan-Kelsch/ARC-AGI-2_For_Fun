@@ -41,6 +41,7 @@ from .inv_ops import (
 )
 from .ops import (
     GP_generate,
+    GP_prune,
     OP_REGISTRY,
     SP_generate,
     bool2_intersect,
@@ -156,6 +157,7 @@ __all__ = [
     "equivalent_gene_idx",
     "sample_operation_params",
     "GP_generate",
+    "GP_prune",
     "SP_generate",
     "bool_mat_ident",
     "bool_sum",
