@@ -7,6 +7,7 @@ from notebooks.ops.inv_ops import (
     inv_bool2_union,
     inv_bool_cavity,
     inv_bool_complement,
+    inv_bool_mat_ident,
     inv_bool_sum,
     inv_dim0_flip,
     inv_dim1_flip,
@@ -34,6 +35,7 @@ def test_inverse_registry_distinguishes_reconstructive_and_null_relations():
     assert INV_OP_REGISTRY["inv_mat2_cwrotate"].reconstructive
 
     assert not INV_OP_REGISTRY["inv_bool_sum"].reconstructive
+    assert not INV_OP_REGISTRY["inv_bool_mat_ident"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool_cavity"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool2_union"].reconstructive
     assert not INV_OP_REGISTRY["inv_bool2_intersect"].reconstructive
@@ -226,6 +228,31 @@ def test_null_inverse_helpers_verify_relations_but_do_not_create_st_proofs():
     )
     assert np.array_equal(recovered_left, left)
     assert np.array_equal(recovered_right, right)
+
+
+def test_inv_bool_mat_ident_is_non_reconstructive_structure_checker():
+    source = np.array(
+        [
+            [True, False],
+            [False, True],
+        ],
+        dtype=bool,
+    )
+
+    recovered = inv_bool_mat_ident(np.int64(2), source)
+    assert np.array_equal(recovered, source)
+
+    with pytest.raises(ValueError, match="integer scalar"):
+        inv_bool_mat_ident(np.array([2], dtype=np.int64), source)
+
+    with pytest.raises(ValueError, match="non-negative"):
+        inv_bool_mat_ident(np.int64(-1), source)
+
+    with pytest.raises(ValueError, match="2D Boolean"):
+        inv_bool_mat_ident(
+            np.int64(0),
+            np.array([True, False], dtype=bool),
+        )
 
 
 def test_inv_bool_cavity_relation_checker():
