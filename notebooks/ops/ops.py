@@ -887,6 +887,108 @@ def _trim_bool_array(array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return starts.copy(), array[slices].copy()
 
 
+def _bool_subjects_2d(
+    array: np.ndarray,
+) -> list[tuple[np.int64, np.int64, np.ndarray]]:
+    """Return row-major 8-connected True components as offset/mask triples."""
+    array = np.asarray(array, dtype=bool)
+
+    if array.ndim != 2:
+        raise ValueError("_bool_subjects_2d requires a 2D boolean matrix.")
+
+    height, width = array.shape
+    visited = np.zeros(array.shape, dtype=bool)
+    subjects: list[tuple[np.int64, np.int64, np.ndarray]] = []
+
+    for start_y in range(height):
+        for start_x in range(width):
+            if not array[start_y, start_x] or visited[start_y, start_x]:
+                continue
+
+            visited[start_y, start_x] = True
+            stack = [(start_y, start_x)]
+            coords: list[tuple[int, int]] = []
+
+            while stack:
+                y, x = stack.pop()
+                coords.append((y, x))
+
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dy == 0 and dx == 0:
+                            continue
+
+                        ny = y + dy
+                        nx = x + dx
+
+                        if (
+                            ny < 0
+                            or ny >= height
+                            or nx < 0
+                            or nx >= width
+                            or visited[ny, nx]
+                            or not array[ny, nx]
+                        ):
+                            continue
+
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+
+            ys = [coord[0] for coord in coords]
+            xs = [coord[1] for coord in coords]
+
+            y0 = min(ys)
+            y1 = max(ys) + 1
+            x0 = min(xs)
+            x1 = max(xs) + 1
+
+            mask = np.zeros((y1 - y0, x1 - x0), dtype=bool)
+
+            for y, x in coords:
+                mask[y - y0, x - x0] = True
+
+            subjects.append(
+                (
+                    np.int64(y0),
+                    np.int64(x0),
+                    mask,
+                )
+            )
+
+    return subjects
+
+
+def _bool_subjects_validator(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> bool:
+    """Require the same positive subject count across all training samples."""
+    source = _source_tuple(source_idx)[0]
+    counts: list[int] = []
+
+    for sample_idx in range(X.sample_count):
+        array = np.asarray(X[source, sample_idx])
+
+        if array.ndim != 2 or any(size == 0 for size in array.shape):
+            return False
+
+        counts.append(len(_bool_subjects_2d(array)))
+
+    return bool(counts) and counts[0] > 0 and len(set(counts)) == 1
+
+
+def _bool_subjects_output_count(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: Any,
+    params: dict[str, Any],
+) -> int:
+    source = _source_tuple(source_idx)[0]
+    return 3 * len(_bool_subjects_2d(np.asarray(X[source, 0])))
+
+
 def _append_gene(
     meta: ProgramMeta,
     X: ProgramX,
@@ -1637,8 +1739,8 @@ def dim2_flip(
 @operation(
     partition="and",
     inverse_op="inv_partition_bool_trim",
-    output_count=2,
-    min_dims_exclusive=0,
+    output_count=3,
+    allowed_dims=(2,),
     atomic_dtypes=(np.bool_,),
     validator=_bool_trim_validator,
 )
@@ -1646,24 +1748,33 @@ def partition_bool_trim(
     meta: ProgramMeta,
     X: ProgramX,
     source_idx: int,
-) -> tuple[int, int]:
-    """Partition a boolean gene into offset and tight remaining structure."""
+) -> tuple[int, int, int]:
+    """Partition a 2D boolean gene into y-offset, x-offset, and tight mask."""
     source_idx = _validate_source(meta, X, source_idx)
 
-    offsets = []
+    y_offsets = []
+    x_offsets = []
     trimmed_values = []
 
     for value in X[source_idx]:
         offset, trimmed = _trim_bool_array(
             np.asarray(value, dtype=bool)
         )
-        offsets.append(offset)
+        y_offsets.append(np.int64(offset[0]))
+        x_offsets.append(np.int64(offset[1]))
         trimmed_values.append(trimmed)
 
-    offset_gidx = _append_gene(
+    y_gidx = _append_gene(
         meta,
         X,
-        offsets,
+        y_offsets,
+        source=source_idx,
+        op_name="partition_bool_trim",
+    )
+    x_gidx = _append_gene(
+        meta,
+        X,
+        x_offsets,
         source=source_idx,
         op_name="partition_bool_trim",
     )
@@ -1675,7 +1786,81 @@ def partition_bool_trim(
         op_name="partition_bool_trim",
     )
 
-    return offset_gidx, data_gidx
+    return y_gidx, x_gidx, data_gidx
+
+
+@operation(
+    partition="null",
+    inverse_op="inv_partition_bool_subjects",
+    output_count=None,
+    output_count_estimator=_bool_subjects_output_count,
+    allowed_dims=(2,),
+    atomic_dtypes=(np.bool_,),
+    validator=_bool_subjects_validator,
+)
+def partition_bool_subjects(
+    meta: ProgramMeta,
+    X: ProgramX,
+    source_idx: int,
+) -> tuple[int, ...]:
+    """Partition 2D boolean matrices into 8-connected True subjects.
+
+    Each subject emits three genes in deterministic row-major component order:
+
+      y_offset, x_offset, tight_subject_mask
+
+    The operation is legal only when every training sample contains the same
+    positive number of subjects, allowing subject position i to remain one
+    gene-aligned semantic slot across samples.
+    """
+    source_idx = _validate_source(meta, X, source_idx)
+
+    subjects_by_sample = [
+        _bool_subjects_2d(np.asarray(value, dtype=bool))
+        for value in X[source_idx]
+    ]
+    subject_count = len(subjects_by_sample[0])
+    generated: list[int] = []
+
+    for subject_idx in range(subject_count):
+        y_values = [
+            np.int64(subjects[subject_idx][0])
+            for subjects in subjects_by_sample
+        ]
+        x_values = [
+            np.int64(subjects[subject_idx][1])
+            for subjects in subjects_by_sample
+        ]
+        mask_values = [
+            subjects[subject_idx][2].copy()
+            for subjects in subjects_by_sample
+        ]
+
+        y_gidx = _append_gene(
+            meta,
+            X,
+            y_values,
+            source=source_idx,
+            op_name="partition_bool_subjects",
+        )
+        x_gidx = _append_gene(
+            meta,
+            X,
+            x_values,
+            source=source_idx,
+            op_name="partition_bool_subjects",
+        )
+        mask_gidx = _append_gene(
+            meta,
+            X,
+            mask_values,
+            source=source_idx,
+            op_name="partition_bool_subjects",
+        )
+
+        generated.extend([y_gidx, x_gidx, mask_gidx])
+
+    return tuple(generated)
 
 def _rng(
     rng: np.random.Generator | int | None,
