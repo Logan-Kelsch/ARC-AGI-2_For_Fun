@@ -848,6 +848,15 @@ Kelschinator must be able to replay the discovered symbolic program and exactly 
 
 ---
 
+## GP pruning
+
+GP_prune(GP_meta, GP_X, ST, prune=5, rng=...) removes expendable GP leaves
+while preserving every ST-solving gene and its recursive GP dependency closure.
+Integer values request a node count; float values in [0, 1] request a proportion
+of the current GP size. Eligible nodes are sampled by a base-e softmax over
+log_(k+1)(x+1), where x is source provenance, so later provenance is more likely
+to be pruned.
+
 ## Operation library
 
 Core operations currently include:

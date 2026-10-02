@@ -21,6 +21,7 @@ from notebooks.ops.inv_ops import (
 )
 from notebooks.ops.ops import (
     GP_generate,
+    GP_prune,
     OP_REGISTRY,
     SP_generate,
     bool2_intersect,
@@ -46,6 +47,7 @@ from notebooks.ops.ops import (
     valid_generation,
     _sample_uniform_legal_candidate,
     _source_selection_probabilities,
+    _gp_prune_probabilities,
 )
 
 
@@ -1393,6 +1395,232 @@ def test_source_selection_softmax_handles_multi_source_candidate_symmetrically()
     )
 
     assert np.allclose(forward, reverse)
+
+
+def _append_test_gp_gene(meta, X, *, source, op, value):
+    gidx = X.append_gene([np.int64(value)] * X.sample_count)
+    meta.append(
+        source=source,
+        op=op,
+        dims=0,
+    )
+    return gidx
+
+
+def test_gp_prune_protects_st_solutions_and_recursive_dependencies():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    g_parent = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_parent", value=10
+    )
+    g_solver = _append_test_gp_gene(
+        GP_meta, GP_X, source=g_parent, op="test_solver", value=11
+    )
+    g_other = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_other", value=12
+    )
+
+    ST.mark_solution(1, g_solver)
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=5,
+        rng=0,
+    )
+
+    assert g_solver not in removed
+    assert g_parent not in removed
+    assert g_other in removed
+
+    solver_node = ST[1]
+    assert solver_node.gp_gidx >= 0
+    assert GP_meta.op[solver_node.gp_gidx] == "test_solver"
+
+    solver_source = int(
+        GP_meta.source[solver_node.gp_gidx]
+    )
+    assert GP_meta.op[solver_source] == "test_parent"
+
+
+def test_gp_prune_remaps_surviving_sources_and_st_gp_indices():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    removable = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_removable", value=20
+    )
+    parent = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_parent_keep", value=21
+    )
+    solver = _append_test_gp_gene(
+        GP_meta, GP_X, source=parent, op="test_solver_keep", value=22
+    )
+
+    ST.mark_solution(1, solver)
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=1,
+        rng=0,
+    )
+
+    assert removed == [removable]
+
+    remapped_solver = ST[1].gp_gidx
+    assert GP_meta.op[remapped_solver] == "test_solver_keep"
+
+    remapped_parent = int(
+        GP_meta.source[remapped_solver]
+    )
+    assert GP_meta.op[remapped_parent] == "test_parent_keep"
+
+
+def test_gp_prune_recalculates_leaves_and_can_remove_chain_exactly():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    parent = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_chain_parent", value=30
+    )
+    child = _append_test_gp_gene(
+        GP_meta, GP_X, source=parent, op="test_chain_child", value=31
+    )
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=2,
+        rng=0,
+    )
+
+    assert removed == [child, parent]
+    assert "test_chain_child" not in GP_meta.op
+    assert "test_chain_parent" not in GP_meta.op
+
+
+def test_gp_prune_preserves_remaining_multioutput_sibling_slots():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    first = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_bundle", value=35
+    )
+    second = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_bundle", value=36
+    )
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=1,
+        rng=0,
+    )
+
+    assert removed == [second]
+    assert "test_bundle" in GP_meta.op
+    remaining = [
+        gidx
+        for gidx, op_name in enumerate(GP_meta.op)
+        if op_name == "test_bundle"
+    ]
+    assert len(remaining) == 1
+    assert GP_X[remaining[0], 0] == np.int64(35)
+
+
+def test_gp_prune_float_is_proportion_of_preprune_gp_size():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    for index in range(5):
+        _append_test_gp_gene(
+            GP_meta,
+            GP_X,
+            source=1,
+            op=f"test_float_{index}",
+            value=40 + index,
+        )
+
+    before = len(GP_X)
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=0.2,
+        rng=1,
+    )
+
+    assert len(removed) == int(np.floor(0.2 * before))
+    assert len(GP_X) == before - len(removed)
+
+
+def test_gp_prune_never_selects_source_zero_or_negative():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    source_zero = _append_test_gp_gene(
+        GP_meta, GP_X, source=0, op="test_source_zero", value=50
+    )
+    eligible = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_source_positive", value=51
+    )
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=5,
+        rng=0,
+    )
+
+    assert eligible in removed
+    assert source_zero not in removed
+    assert "test_source_zero" in GP_meta.op
+
+
+def test_gp_prune_probabilities_follow_positive_log_source_score():
+    GP_meta = ProgramMeta(side="GP")
+    GP_X = ProgramX(side="GP", sample_count=1)
+
+    _append_test_gp_gene(
+        GP_meta, GP_X, source=-1, op="raw", value=0
+    )
+    _append_test_gp_gene(
+        GP_meta, GP_X, source=0, op="source_zero", value=1
+    )
+    g_early = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="early", value=2
+    )
+    g_late = _append_test_gp_gene(
+        GP_meta, GP_X, source=2, op="late", value=3
+    )
+
+    probabilities = _gp_prune_probabilities(
+        GP_meta,
+        [g_early, g_late],
+    )
+
+    k = len(OP_REGISTRY)
+    x = np.asarray([1.0, 2.0])
+    scores = np.log(x + 1.0) / np.log(k + 1.0)
+    expected = np.exp(scores - np.max(scores))
+    expected /= np.sum(expected)
+
+    assert np.allclose(probabilities, expected)
+    assert probabilities[1] > probabilities[0]
+
+
+def test_gp_prune_validates_count_and_proportion():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    with pytest.raises(TypeError):
+        GP_prune(GP_meta, GP_X, ST, prune=True)
+
+    with pytest.raises(ValueError, match=">= 0"):
+        GP_prune(GP_meta, GP_X, ST, prune=-1)
+
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        GP_prune(GP_meta, GP_X, ST, prune=1.1)
 
 
 def test_gp_duplicate_retry_keeps_same_prior_until_100_failure_switch(capsys):

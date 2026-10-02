@@ -2111,6 +2111,283 @@ def _no_legal_candidate_message(side: str) -> str:
     )
 
 
+def _gp_protected_indices(
+    GP_meta: ProgramMeta,
+    ST: SolutionTree,
+) -> set[int]:
+    """Return ST-solving GP genes and their complete dependency closure."""
+    protected: set[int] = set()
+
+    def protect(gidx: int) -> None:
+        gidx = int(gidx)
+
+        if gidx in protected:
+            return
+        if gidx < 0 or gidx >= len(GP_meta):
+            raise IndexError(
+                f"ST references GP gene {gidx} outside range "
+                f"[0, {len(GP_meta) - 1}]."
+            )
+
+        protected.add(gidx)
+
+        for source_gidx in _source_tuple(GP_meta.source[gidx]):
+            if source_gidx >= 0:
+                protect(source_gidx)
+
+    for node in ST.nodes.values():
+        if node.gp_gidx >= 0:
+            protect(node.gp_gidx)
+
+    return protected
+
+
+def _gp_gene_signature(
+    GP_meta: ProgramMeta,
+    gidx: int,
+):
+    """Transition signature used to preserve multi-output sibling slots."""
+    return (
+        GP_meta.op[gidx],
+        _freeze_value(GP_meta.source[gidx]),
+        _freeze_value(GP_meta.params[gidx]),
+    )
+
+
+def _gp_prune_eligible_indices(
+    GP_meta: ProgramMeta,
+    ST: SolutionTree,
+) -> list[int]:
+    """Return GP leaves that can be deleted without invalidating survivors."""
+    protected = _gp_protected_indices(GP_meta, ST)
+
+    referenced: set[int] = set()
+    for source in GP_meta.source:
+        referenced.update(
+            index
+            for index in _source_tuple(source)
+            if index >= 0
+        )
+
+    last_sibling: dict[Any, int] = {}
+    for gidx in range(len(GP_meta)):
+        last_sibling[_gp_gene_signature(GP_meta, gidx)] = gidx
+
+    eligible: list[int] = []
+
+    for gidx in range(len(GP_meta)):
+        if gidx in protected:
+            continue
+
+        sources = _source_tuple(GP_meta.source[gidx])
+
+        if not sources or any(source <= 0 for source in sources):
+            continue
+
+        if gidx in referenced:
+            continue
+
+        if last_sibling[_gp_gene_signature(GP_meta, gidx)] != gidx:
+            continue
+
+        eligible.append(gidx)
+
+    return eligible
+
+
+def _gp_prune_probabilities(
+    GP_meta: ProgramMeta,
+    eligible: list[int],
+) -> np.ndarray:
+    """Softmax pruning probabilities favoring later source provenance."""
+    if not eligible:
+        return np.empty(0, dtype=float)
+
+    k = len(OP_REGISTRY)
+    if k < 1:
+        raise RuntimeError("OP_REGISTRY must contain at least one operation.")
+
+    denominator = np.log(float(k + 1))
+    scores = []
+
+    for gidx in eligible:
+        source_values = np.asarray(
+            _source_tuple(GP_meta.source[gidx]),
+            dtype=float,
+        )
+        x = float(np.mean(source_values))
+
+        if x <= 0:
+            raise ValueError(
+                "GP prune scoring requires candidate source indices > 0."
+            )
+
+        scores.append(
+            np.log(x + 1.0) / denominator
+        )
+
+    scores = np.asarray(scores, dtype=float)
+    exp_scores = np.exp(scores - np.max(scores))
+    return exp_scores / np.sum(exp_scores)
+
+
+def _remap_source_after_gp_delete(
+    source: Any,
+    removed_gidx: int,
+):
+    """Shift one normalized source reference after deleting a GP index."""
+    indices = _source_tuple(source)
+
+    if removed_gidx in indices:
+        raise RuntimeError(
+            "Cannot delete a GP gene that is still referenced by a survivor."
+        )
+
+    remapped = tuple(
+        index - 1 if index > removed_gidx else index
+        for index in indices
+    )
+
+    if len(remapped) == 1:
+        return remapped[0]
+
+    return remapped
+
+
+def _delete_gp_gene(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    ST: SolutionTree,
+    gidx: int,
+) -> None:
+    """Delete one graph-safe GP leaf and remap every surviving reference."""
+    gidx = int(gidx)
+
+    for source in GP_meta.source:
+        if gidx in _source_tuple(source):
+            raise RuntimeError(
+                f"GP gene {gidx} is still referenced and cannot be pruned."
+            )
+
+    del GP_meta.source[gidx]
+    del GP_meta.op[gidx]
+    del GP_meta.dims[gidx]
+    del GP_meta.params[gidx]
+    del GP_X.genes[gidx]
+
+    GP_meta.source[:] = [
+        _remap_source_after_gp_delete(source, gidx)
+        for source in GP_meta.source
+    ]
+
+    for node in ST.nodes.values():
+        if node.gp_gidx == gidx:
+            raise RuntimeError(
+                f"Attempted to prune ST-solving GP gene {gidx}."
+            )
+        if node.gp_gidx > gidx:
+            node.gp_gidx -= 1
+
+
+def _gp_prune_target_count(
+    prune: int | float,
+    gp_count: int,
+) -> int:
+    if isinstance(prune, bool):
+        raise TypeError("prune must be an int count or float proportion.")
+
+    if isinstance(prune, (int, np.integer)):
+        prune = int(prune)
+        if prune < 0:
+            raise ValueError("integer prune count must be >= 0.")
+        return prune
+
+    if isinstance(prune, (float, np.floating)):
+        prune = float(prune)
+        if not 0.0 <= prune <= 1.0:
+            raise ValueError("float prune proportion must be in [0, 1].")
+        return int(np.floor(prune * gp_count))
+
+    raise TypeError("prune must be an int count or float proportion.")
+
+
+def GP_prune(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    ST: SolutionTree,
+    prune: int | float = 5,
+    *,
+    rng: np.random.Generator | int | None = None,
+) -> list[int]:
+    """Probabilistically prune graph-safe, non-solution GP genes.
+
+    prune is either an integer node count or a float proportion in [0, 1].
+    Genes are never eligible when any source index is <= 0. Any GP gene that
+    directly solves an ST node, plus its recursive GP dependency closure, is
+    protected.
+
+    Pruning proceeds one leaf at a time, recalculating eligibility and
+    probabilities after every deletion so surviving source references remain
+    valid. Eligible gene g with mean source index x receives:
+
+        score = log_(k + 1)(x + 1)
+
+    where k = len(OP_REGISTRY), followed by base-e softmax sampling.
+
+    Returns the original pre-prune GP indices removed, in selection order. If
+    structural/protection constraints leave fewer removable nodes than
+    requested, the returned list is shorter.
+    """
+    if GP_meta.side != "GP" or GP_X.side != "GP":
+        raise ValueError("GP_prune requires GP-side ProgramMeta and ProgramX.")
+    if len(GP_meta) != len(GP_X):
+        raise ValueError("GP_meta and GP_X must contain the same number of genes.")
+    if not isinstance(ST, SolutionTree):
+        raise TypeError("ST must be a SolutionTree.")
+
+    if ST._GP_meta is not None and ST._GP_meta is not GP_meta:
+        raise ValueError("ST is bound to a different GP_meta.")
+    if ST._GP_X is not None and ST._GP_X is not GP_X:
+        raise ValueError("ST is bound to a different GP_X.")
+
+    target = _gp_prune_target_count(prune, len(GP_X))
+    if target == 0:
+        return []
+
+    rng = _rng(rng)
+    original_indices = list(range(len(GP_X)))
+    removed_original: list[int] = []
+
+    while len(removed_original) < target:
+        eligible = _gp_prune_eligible_indices(GP_meta, ST)
+
+        if not eligible:
+            break
+
+        probabilities = _gp_prune_probabilities(
+            GP_meta,
+            eligible,
+        )
+        selected_pos = int(
+            rng.choice(
+                len(eligible),
+                p=probabilities,
+            )
+        )
+        gidx = eligible[selected_pos]
+
+        removed_original.append(original_indices[gidx])
+        _delete_gp_gene(
+            GP_meta,
+            GP_X,
+            ST,
+            gidx,
+        )
+        del original_indices[gidx]
+
+    return removed_original
+
+
 def GP_generate(
     GP_meta: ProgramMeta,
     GP_X: ProgramX,
