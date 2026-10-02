@@ -1438,9 +1438,9 @@ def test_gp_prune_protects_st_solutions_and_recursive_dependencies():
     assert solver_node.gp_gidx >= 0
     assert GP_meta.op[solver_node.gp_gidx] == "test_solver"
 
-    solver_source = _source_tuple(
+    solver_source = int(
         GP_meta.source[solver_node.gp_gidx]
-    )[0]
+    )
     assert GP_meta.op[solver_source] == "test_parent"
 
 
@@ -1472,9 +1472,9 @@ def test_gp_prune_remaps_surviving_sources_and_st_gp_indices():
     remapped_solver = ST[1].gp_gidx
     assert GP_meta.op[remapped_solver] == "test_solver_keep"
 
-    remapped_parent = _source_tuple(
+    remapped_parent = int(
         GP_meta.source[remapped_solver]
-    )[0]
+    )
     assert GP_meta.op[remapped_parent] == "test_parent_keep"
 
 
@@ -1499,6 +1499,35 @@ def test_gp_prune_recalculates_leaves_and_can_remove_chain_exactly():
     assert removed == [child, parent]
     assert "test_chain_child" not in GP_meta.op
     assert "test_chain_parent" not in GP_meta.op
+
+
+def test_gp_prune_preserves_remaining_multioutput_sibling_slots():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    first = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_bundle", value=35
+    )
+    second = _append_test_gp_gene(
+        GP_meta, GP_X, source=1, op="test_bundle", value=36
+    )
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=1,
+        rng=0,
+    )
+
+    assert removed == [second]
+    assert "test_bundle" in GP_meta.op
+    remaining = [
+        gidx
+        for gidx, op_name in enumerate(GP_meta.op)
+        if op_name == "test_bundle"
+    ]
+    assert len(remaining) == 1
+    assert GP_X[remaining[0], 0] == np.int64(35)
 
 
 def test_gp_prune_float_is_proportion_of_preprune_gp_size():
