@@ -899,6 +899,7 @@ def _candidate_2d_rule_solutions(
             dict[str, Any],
         ]
     ] = []
+    n = len(y_gene)
 
     def add(
         level: int,
@@ -978,7 +979,8 @@ def _candidate_2d_rule_solutions(
     y0 = np.asarray(y_gene[0])
 
     if (
-        x0.ndim == 2
+        n >= 2
+        and x0.ndim == 2
         and y0.ndim == 2
         and x0.shape[0] <= y0.shape[0]
         and x0.shape[1] <= y0.shape[1]
@@ -1050,7 +1052,8 @@ def _candidate_2d_rule_solutions(
 
     # Level 4: fixed crop.
     if (
-        x0.ndim == 2
+        n >= 2
+        and x0.ndim == 2
         and y0.ndim == 2
         and y0.shape[0] <= x0.shape[0]
         and y0.shape[1] <= x0.shape[1]
@@ -1089,7 +1092,7 @@ def _candidate_2d_rule_solutions(
                     )
 
     # Level 5: same-canvas fixed translation with zero fill.
-    if x0.shape == y0.shape:
+    if n >= 2 and x0.shape == y0.shape:
         h0, w0 = x0.shape
 
         for dr in range(-(h0 - 1), h0):
@@ -1238,10 +1241,10 @@ def solve_2dim_1gene_basic(
         0. Y = X
         1. zero-background structural embed
            top-left / top-right / bottom-left / bottom-right / center
-        2. zero-background fixed embed(row, col)
+        2. zero-background fixed embed(row, col), n >= 2
         3. structural crop
-        4. fixed crop(row, col)
-        5. fixed translation shift_zero(dr, dc)
+        4. fixed crop(row, col), n >= 2
+        5. fixed translation shift_zero(dr, dc), n >= 2
         6. fixed integer tile(rows, cols)
 
     A candidate is accepted only when it reconstructs the complete target
