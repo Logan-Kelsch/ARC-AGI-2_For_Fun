@@ -1,3 +1,7 @@
+from .kelschinator import (
+    Kelschinator,
+    KelschinatorCompileError,
+)
 from .environment import (
     ProgramMeta,
     ProgramX,
@@ -97,6 +101,8 @@ from .loss import (
 )
 
 __all__ = [
+    "Kelschinator",
+    "KelschinatorCompileError",
     "ProgramMeta",
     "ProgramX",
     "STNodeRef",
