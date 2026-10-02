@@ -59,8 +59,10 @@ from .ops import (
     valid_generation,
 )
 from .solve import (
+    Matrix1GeneSolution,
     Scalar1GeneSolution,
     solve_0dim_1gene_basic,
+    solve_2dim_1gene_basic,
 )
 """Notebook-local analytical operation library."""
 
@@ -150,7 +152,9 @@ __all__ = [
     "partition_shape",
     "partition_composite",
     "Scalar1GeneSolution",
+    "Matrix1GeneSolution",
     "solve_0dim_1gene_basic",
+    "solve_2dim_1gene_basic",
     "DEFAULT_ABS_KERNELS",
     "survey_abs_kernels",
     "GP_EvalNode",
