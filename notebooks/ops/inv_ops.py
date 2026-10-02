@@ -364,35 +364,102 @@ def inv_dim2_flip(value: Any) -> np.ndarray:
 
 @inverse_operation("partition_bool_trim")
 def inv_partition_bool_trim(
-    offset: Any,
+    y_offset: Any,
+    x_offset: Any,
     trimmed: Any,
     shape: Any,
 ) -> np.ndarray:
-    """Reconstruct trimmed boolean data when the original shape is known."""
-    offset = np.asarray(offset, dtype=np.int64)
+    """Reconstruct a trimmed 2D boolean mask when original shape is known."""
+    y_array = np.asarray(y_offset)
+    x_array = np.asarray(x_offset)
     trimmed = np.asarray(trimmed, dtype=bool)
     shape = _as_shape(shape)
 
-    if offset.ndim != 1:
-        raise ValueError("offset must be a 1D vector.")
-    if len(offset) != len(shape):
-        raise ValueError("offset dimensionality must match shape.")
-    if trimmed.ndim != len(shape):
-        raise ValueError("trimmed dimensionality must match shape.")
+    if y_array.ndim != 0 or x_array.ndim != 0:
+        raise ValueError("y_offset and x_offset must be scalar.")
+    if len(shape) != 2:
+        raise ValueError("partition_bool_trim reconstruction requires 2D shape.")
+    if trimmed.ndim != 2:
+        raise ValueError("trimmed must be a 2D boolean matrix.")
 
-    stops = offset + np.asarray(trimmed.shape, dtype=np.int64)
+    y = int(y_array.item())
+    x = int(x_array.item())
 
-    if np.any(offset < 0) or np.any(stops > np.asarray(shape)):
+    if y < 0 or x < 0:
+        raise ValueError("trim offsets must be non-negative.")
+
+    stop_y = y + trimmed.shape[0]
+    stop_x = x + trimmed.shape[1]
+
+    if stop_y > shape[0] or stop_x > shape[1]:
         raise ValueError("trimmed data does not fit inside requested shape.")
 
     result = np.zeros(shape, dtype=bool)
-    slices = tuple(
-        slice(int(start), int(stop))
-        for start, stop in zip(offset, stops)
-    )
-    result[slices] = trimmed
-
+    result[y:stop_y, x:stop_x] = trimmed
     return result
+
+
+@inverse_operation("partition_bool_subjects", reconstructive=False)
+def inv_partition_bool_subjects(
+    *parts_and_source: Any,
+):
+    """Verify subject triples against a source without claiming reconstruction."""
+    if len(parts_and_source) < 4:
+        raise ValueError(
+            "partition_bool_subjects inverse requires subject triples and source."
+        )
+
+    *parts, source = parts_and_source
+
+    if len(parts) % 3 != 0:
+        raise ValueError(
+            "partition_bool_subjects parts must be y/x/mask triples."
+        )
+
+    source_array = np.asarray(source)
+
+    if source_array.ndim != 2 or source_array.dtype != np.bool_:
+        raise ValueError(
+            "partition_bool_subjects source must be a 2D Boolean matrix."
+        )
+
+    reconstructed = np.zeros(source_array.shape, dtype=bool)
+
+    for index in range(0, len(parts), 3):
+        y_array = np.asarray(parts[index])
+        x_array = np.asarray(parts[index + 1])
+        mask = np.asarray(parts[index + 2])
+
+        if y_array.ndim != 0 or x_array.ndim != 0:
+            raise ValueError("subject offsets must be scalar.")
+        if mask.ndim != 2 or mask.dtype != np.bool_ or not np.any(mask):
+            raise ValueError(
+                "subject mask must be a non-empty 2D Boolean matrix."
+            )
+
+        y = int(y_array.item())
+        x = int(x_array.item())
+
+        if y < 0 or x < 0:
+            raise ValueError("subject offsets must be non-negative.")
+
+        stop_y = y + mask.shape[0]
+        stop_x = x + mask.shape[1]
+
+        if stop_y > source_array.shape[0] or stop_x > source_array.shape[1]:
+            raise ValueError("subject mask does not fit inside source.")
+
+        target = reconstructed[y:stop_y, x:stop_x]
+
+        if np.any(np.logical_and(target, mask)):
+            raise ValueError("subject masks may not overlap.")
+
+        target |= mask
+
+    if not np.array_equal(reconstructed, source_array):
+        raise ValueError("partition_bool_subjects inverse check failed.")
+
+    return _copy(source)
 
 
 def _axis_adjacent_cavity_mask(array: np.ndarray) -> np.ndarray:
