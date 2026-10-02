@@ -1134,6 +1134,47 @@ def test_valid_generation_partition_composite_requires_dims_gt_one_and_int64():
     )
 
 
+def test_partition_composite_skips_invalid_empty_source_before_counting_outputs():
+    meta, X = _raw_program(
+        "GP",
+        [np.empty((0, 0), dtype=bool)],
+        raw_op="raw_input",
+    )
+
+    candidate = _sample_uniform_legal_candidate(
+        meta,
+        X,
+        rng=np.random.default_rng(0),
+        max_output_count=1,
+        operation_names=("partition_composite",),
+    )
+
+    assert candidate is None
+
+
+def test_partition_bool_trim_empty_output_is_rejected_transactionally(capsys):
+    meta, X = _raw_program(
+        "GP",
+        [np.zeros((2, 2), dtype=bool)],
+        raw_op="raw_input",
+    )
+
+    created = GP_generate(
+        meta,
+        X,
+        2,
+        rng=0,
+        max_attempts_per_generation=3,
+        operation_names=("partition_bool_trim",),
+    )
+
+    output = capsys.readouterr().out
+
+    assert created == []
+    assert len(meta) == len(X) == 1
+    assert "3 consecutive rejected stochastic attempts" in output
+
+
 def test_exact_transition_duplicate_includes_operation_source_and_params():
     @operation(
         partition="null",
