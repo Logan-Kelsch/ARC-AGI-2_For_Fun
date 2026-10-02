@@ -1,88 +1,171 @@
-# ARC-AGI-2 architecture
+# ARC-AGI-2 Architecture
 
-## What was removed
+The current solver is an experimental **bidirectional symbolic program synthesis** system.
 
-The previous repository targeted ARC-AGI-3 and therefore had concepts that no longer belong:
+For implementation-level details, see:
 
-- interactive environments
-- action enums
-- game state
-- transition histories
-- environment scorecards
-- world-model rollouts over action sequences
-- an Agent adapter
+~~~text
+docs/GP_SP_ENVIRONMENT.md
+~~~
 
-ARC-AGI-2 is static program induction.
+## System view
 
-## Fixed outer loop
+~~~text
+                 TRAINING INPUTS
+                       |
+                       v
+                GP forward search
+                       |
+                       v
+               candidate semantics
+                       |
+                       |
+                exact matching
+                       |
+                       |
+               required semantics
+                       ^
+                       |
+               SP / ST backward
+              reconstructive search
+                       ^
+                       |
+                 TRAINING OUTPUTS
 
-For one task:
 
-```text
-D = {(X1,Y1), ... , (Xn,Yn)}
-test inputs = {T1, ... , Tm}
-```
+              solved Boolean proof
+                       |
+                       v
+                  Kelschinator
+                       |
+                       v
+                 executable program
+                       |
+                       v
+                  TEST INPUT
+                       |
+                       v
+                     y_hat
+~~~
 
-A candidate program `p` is evaluated on the demonstrations:
+## Forward side: GP
 
-```text
-p(Xi) -> Y_hat_i
-```
+GP grows symbolic programs from the input.
 
-Primary fitness:
+Each gene has:
 
-```text
-F_exact(p) = (1/n) * sum_i 1[p(Xi) = Yi]
-```
+~~~text
+source
+operation
+dimensions
+parameters
+instantiated values across samples
+~~~
 
-The solver retains two candidate programs because the competition accepts two attempts per test input.
+The same gene index has the same semantic meaning for every training example.
 
-## Mapping to grammatical optimization
+GP can use reconstructive or information-losing operations because it is a candidate feature/program space.
 
-```text
-grammar G
-   ↓
-partial program
-   ↓ production rule
-larger partial program
-   ↓
-...
-   ↓
-executable program p
-   ↓
-evaluate on demonstrations
-   ↓
-fitness / novelty / complexity / robustness
-```
+## Backward side: SP
 
-Genetic programming can mutate/crossover complete syntax trees.
+SP begins at the known output and explores reversible decompositions and alternate representations.
 
-MCTS can treat grammar derivation as a search tree:
+Operations are classified as:
 
-- state: partial program
-- action: legal grammar production
-- transition: extend the program
-- terminal state: executable program
-- reward: demonstration performance plus regularization/generalization signals
+~~~text
+AND   children jointly reconstruct the source
+OR    transformed representation is a reversible alternative
+NULL  not a valid SP proof transformation
+~~~
 
-This is where the stochastic MCTS idea belongs in ARC-AGI-2.
+Only AND and OR operations grow SP.
 
-## Preventing task-level overfit
+## Proof side: ST
 
-A program that fits a few demonstrations may still infer the wrong rule. Future fitness should consider:
+ST is a Boolean reconstructive proof.
 
-- minimum description length / complexity penalty
-- leave-one-demonstration-out consistency
-- object-level invariants
-- transformation equivalence classes
-- robustness to synthetic variants
-- reusable learned macros across public training tasks
-- diversity between attempt 1 and attempt 2
+A node can be solved:
 
-The public evaluation set should remain an outer validation set rather than an inner-loop search signal.
+~~~text
+directly:
+    GP gene + exact symbolic matching rule
 
-## Current scaffold
+or
 
-The current `PrimitiveSearchSolver` searches only seven simple geometric programs. It exists to prove the contract, not to define the final approach.
+indirectly:
+    satisfied AND/OR derivation + known inverse operations
+~~~
 
-The next serious layer should introduce a typed DSL and a search engine over its syntax trees.
+The default decomposition is based on output shape and categorical composition.
+
+## Semantic meeting point
+
+GP and ST expose compatible typed pools:
+
+~~~python
+get_GP_pool(...)
+get_ST_unsovled_frontier(...)
+~~~
+
+Current exact matchers include:
+
+~~~text
+solve_0dim_1gene_basic
+solve_2dim_1gene_basic
+~~~
+
+They search low-complexity rule families and accept only zero-residual behavior across every training sample.
+
+## Final compilation
+
+Once ST is fully solved:
+
+~~~python
+kelschinator = Kelschinator()
+fit_success = kelschinator.fit(ST)
+~~~
+
+Kelschinator:
+
+1. selects a satisfied reconstructive proof;
+2. traces only the GP dependencies used by that proof;
+3. freezes matching rules and inverse operations;
+4. validates the distilled program on every training pair.
+
+Then:
+
+~~~python
+y_hat = kelschinator.transform(X_test)
+~~~
+
+executes the synthesized program on an unseen input.
+
+## Search philosophy
+
+The current system prioritizes:
+
+~~~text
+exact semantics
+minimum-complexity exact rules
+explicit symbolic state
+reconstructive proofs
+training replay validation
+~~~
+
+rather than continuous similarity or a large black-box predictive model.
+
+## Legacy architecture
+
+The repository still contains earlier GP_Set, GP evaluation-tree, and loss-tree experiments.
+
+Those remain useful historical/reference material but are not the current solver path.
+
+Current work should generally target:
+
+~~~text
+notebooks/ops/environment.py
+notebooks/ops/ops.py
+notebooks/ops/inv_ops.py
+notebooks/ops/solve.py
+notebooks/ops/kelschinator.py
+~~~
