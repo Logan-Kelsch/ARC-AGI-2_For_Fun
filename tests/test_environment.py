@@ -41,6 +41,7 @@ from notebooks.ops.ops import (
     mat2_cwrotate,
     operation,
     operation_output_count,
+    partition_bool_subjects,
     partition_bool_trim,
     partition_composite,
     partition_shape,
@@ -1166,7 +1167,7 @@ def test_partition_bool_trim_empty_output_is_rejected_transactionally(capsys):
     created = GP_generate(
         meta,
         X,
-        2,
+        3,
         rng=0,
         max_attempts_per_generation=3,
         operation_names=("partition_bool_trim",),
@@ -2174,37 +2175,16 @@ def test_dim_flips_apply_to_requested_axis_and_enforce_minimum_dims():
     assert not valid_generation(vector_meta, vector_X, dim2_flip, 0)
 
 
-def test_partition_bool_trim_1d_returns_offset_and_trimmed_structure():
-    meta, X = _raw_program(
-        "GP",
-        [np.array([False, True, True], dtype=bool)],
-        raw_op="raw_input",
-    )
-
-    assert valid_generation(meta, X, partition_bool_trim, 0)
-
-    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
-
-    assert np.array_equal(
-        X[offset_gidx, 0],
-        np.array([1], dtype=np.int64),
-    )
-    assert np.array_equal(
-        X[data_gidx, 0],
-        np.array([True, True], dtype=bool),
-    )
-    assert meta.dims[offset_gidx] == 1
-    assert meta.dims[data_gidx] == 1
-
-
-def test_partition_bool_trim_2d_matches_requested_example():
+def test_partition_bool_trim_emits_y_x_and_mask_genes():
     meta, X = _raw_program(
         "GP",
         [
             np.array(
                 [
-                    [False, False],
-                    [False, True],
+                    [False, False, False, False],
+                    [False, False, True, True],
+                    [False, False, True, False],
+                    [False, False, False, False],
                 ],
                 dtype=bool,
             )
@@ -2212,47 +2192,54 @@ def test_partition_bool_trim_2d_matches_requested_example():
         raw_op="raw_input",
     )
 
-    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+    assert valid_generation(meta, X, partition_bool_trim, 0)
+    assert operation_output_count(
+        partition_bool_trim,
+        meta,
+        X,
+        0,
+    ) == 3
 
-    assert np.array_equal(
-        X[offset_gidx, 0],
-        np.array([1, 1], dtype=np.int64),
-    )
+    y_gidx, x_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+
+    assert X[y_gidx, 0] == np.int64(1)
+    assert X[x_gidx, 0] == np.int64(2)
     assert np.array_equal(
         X[data_gidx, 0],
-        np.array([[True]], dtype=bool),
+        np.array(
+            [
+                [True, True],
+                [True, False],
+            ],
+            dtype=bool,
+        ),
     )
+    assert meta.dims[y_gidx] == 0
+    assert meta.dims[x_gidx] == 0
+    assert meta.dims[data_gidx] == 2
 
 
-def test_partition_bool_trim_finds_nd_boolean_bounding_box():
-    source = np.zeros((4, 5, 6), dtype=bool)
-    source[1:3, 2:4, 1:5] = True
-
-    meta, X = _raw_program(
+def test_partition_bool_trim_is_now_exactly_2d_boolean():
+    vector_meta, vector_X = _raw_program(
         "GP",
-        [source],
-        raw_op="raw_input",
-    )
-
-    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
-
-    assert np.array_equal(
-        X[offset_gidx, 0],
-        np.array([1, 2, 1], dtype=np.int64),
-    )
-    assert X[data_gidx, 0].shape == (2, 2, 4)
-    assert np.all(X[data_gidx, 0])
-
-
-def test_partition_bool_trim_requires_bool_dim_gt_zero_and_trim_boundary():
-    tight_meta, tight_X = _raw_program(
-        "GP",
-        [np.array([[True, True], [True, True]], dtype=bool)],
+        [np.array([False, True, True], dtype=bool)],
         raw_op="raw_input",
     )
     assert not valid_generation(
-        tight_meta,
-        tight_X,
+        vector_meta,
+        vector_X,
+        partition_bool_trim,
+        0,
+    )
+
+    cube_meta, cube_X = _raw_program(
+        "GP",
+        [np.ones((2, 2, 2), dtype=bool)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        cube_meta,
+        cube_X,
         partition_bool_trim,
         0,
     )
@@ -2269,20 +2256,20 @@ def test_partition_bool_trim_requires_bool_dim_gt_zero_and_trim_boundary():
         0,
     )
 
-    scalar_meta = ProgramMeta(side="GP")
-    scalar_X = ProgramX(side="GP", sample_count=1)
-    scalar_X.append_gene([np.bool_(True)])
-    scalar_meta.append(source=-1, op="raw_bool", dims=0)
-
+    tight_meta, tight_X = _raw_program(
+        "GP",
+        [np.array([[True, True], [True, True]], dtype=bool)],
+        raw_op="raw_input",
+    )
     assert not valid_generation(
-        scalar_meta,
-        scalar_X,
+        tight_meta,
+        tight_X,
         partition_bool_trim,
         0,
     )
 
 
-def test_partition_bool_trim_all_false_returns_empty_nd_structure():
+def test_partition_bool_trim_all_false_direct_call_has_empty_mask():
     source = np.zeros((2, 3), dtype=bool)
     meta, X = _raw_program(
         "GP",
@@ -2290,14 +2277,216 @@ def test_partition_bool_trim_all_false_returns_empty_nd_structure():
         raw_op="raw_input",
     )
 
-    offset_gidx, data_gidx = partition_bool_trim(meta, X, 0)
+    y_gidx, x_gidx, data_gidx = partition_bool_trim(meta, X, 0)
 
-    assert np.array_equal(
-        X[offset_gidx, 0],
-        np.array([0, 0], dtype=np.int64),
-    )
+    assert X[y_gidx, 0] == np.int64(0)
+    assert X[x_gidx, 0] == np.int64(0)
     assert X[data_gidx, 0].shape == (0, 0)
     assert X[data_gidx, 0].dtype == bool
+
+
+def test_partition_bool_subjects_uses_8_connected_components():
+    source = np.array(
+        [
+            [True, False, False, False, False, False],
+            [False, True, False, True, True, False],
+            [False, False, True, True, False, False],
+            [False, False, False, False, False, True],
+        ],
+        dtype=bool,
+    )
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    assert valid_generation(meta, X, partition_bool_subjects, 0)
+    assert operation_output_count(
+        partition_bool_subjects,
+        meta,
+        X,
+        0,
+    ) == 6
+
+    generated = partition_bool_subjects(meta, X, 0)
+    assert len(generated) == 6
+
+    y0, x0, mask0, y1, x1, mask1 = generated
+
+    # (0,0)->(1,1)->(2,2) is one diagonal-connected body, and it also
+    # reaches the cluster at (1,3)/(2,3) through the 3x3 neighborhood.
+    assert X[y0, 0] == np.int64(0)
+    assert X[x0, 0] == np.int64(0)
+    assert np.array_equal(
+        X[mask0, 0],
+        np.array(
+            [
+                [True, False, False, False],
+                [False, True, False, True],
+                [False, False, True, True],
+            ],
+            dtype=bool,
+        ),
+    )
+
+    assert X[y1, 0] == np.int64(3)
+    assert X[x1, 0] == np.int64(5)
+    assert np.array_equal(
+        X[mask1, 0],
+        np.array([[True]], dtype=bool),
+    )
+
+
+def test_partition_bool_subjects_o_with_center_dot_is_two_subjects():
+    source = np.array(
+        [
+            [True, True, True, True, True],
+            [True, False, False, False, True],
+            [True, False, True, False, True],
+            [True, False, False, False, True],
+            [True, True, True, True, True],
+        ],
+        dtype=bool,
+    )
+    meta, X = _raw_program(
+        "GP",
+        [source],
+        raw_op="raw_input",
+    )
+
+    generated = partition_bool_subjects(meta, X, 0)
+    assert len(generated) == 6
+
+    outer_y, outer_x, outer_mask, dot_y, dot_x, dot_mask = generated
+
+    assert X[outer_y, 0] == np.int64(0)
+    assert X[outer_x, 0] == np.int64(0)
+
+    expected_outer = source.copy()
+    expected_outer[2, 2] = False
+    assert np.array_equal(X[outer_mask, 0], expected_outer)
+
+    assert X[dot_y, 0] == np.int64(2)
+    assert X[dot_x, 0] == np.int64(2)
+    assert np.array_equal(
+        X[dot_mask, 0],
+        np.array([[True]], dtype=bool),
+    )
+
+
+def test_partition_bool_subjects_aligns_subject_slots_across_samples():
+    sample_a = np.array(
+        [
+            [True, True, False, False],
+            [False, False, False, True],
+        ],
+        dtype=bool,
+    )
+    sample_b = np.array(
+        [
+            [False, True, False, False],
+            [False, True, False, False],
+            [False, False, False, True],
+        ],
+        dtype=bool,
+    )
+    meta, X = _raw_program(
+        "GP",
+        [sample_a, sample_b],
+        raw_op="raw_input",
+    )
+
+    generated = partition_bool_subjects(meta, X, 0)
+    assert len(generated) == 6
+
+    y0, x0, mask0, y1, x1, mask1 = generated
+
+    assert [int(value) for value in X[y0]] == [0, 0]
+    assert [int(value) for value in X[x0]] == [0, 1]
+    assert [int(value) for value in X[y1]] == [1, 2]
+    assert [int(value) for value in X[x1]] == [3, 3]
+    assert all(np.asarray(value).dtype == bool for value in X[mask0])
+    assert all(np.asarray(value).dtype == bool for value in X[mask1])
+
+
+def test_partition_bool_subjects_rejects_mismatched_or_zero_subject_counts():
+    mismatched_meta, mismatched_X = _raw_program(
+        "GP",
+        [
+            np.array(
+                [
+                    [True, False, False],
+                    [False, False, True],
+                ],
+                dtype=bool,
+            ),
+            np.array(
+                [
+                    [True, False, False],
+                    [False, True, False],
+                ],
+                dtype=bool,
+            ),
+        ],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        mismatched_meta,
+        mismatched_X,
+        partition_bool_subjects,
+        0,
+    )
+
+    empty_meta, empty_X = _raw_program(
+        "GP",
+        [np.zeros((3, 3), dtype=bool)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        empty_meta,
+        empty_X,
+        partition_bool_subjects,
+        0,
+    )
+
+
+def test_partition_bool_subjects_requires_2d_bool_and_is_gp_only():
+    int_meta, int_X = _raw_program(
+        "GP",
+        [np.array([[0, 1]], dtype=np.int64)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        int_meta,
+        int_X,
+        partition_bool_subjects,
+        0,
+    )
+
+    vector_meta, vector_X = _raw_program(
+        "GP",
+        [np.array([True, False], dtype=bool)],
+        raw_op="raw_input",
+    )
+    assert not valid_generation(
+        vector_meta,
+        vector_X,
+        partition_bool_subjects,
+        0,
+    )
+
+    sp_meta, sp_X = _raw_program(
+        "SP",
+        [np.array([[True]], dtype=bool)],
+        raw_op="raw_output",
+    )
+    assert not valid_generation(
+        sp_meta,
+        sp_X,
+        partition_bool_subjects,
+        0,
+    )
 
 
 def test_operation_partition_categories():
@@ -2314,6 +2503,7 @@ def test_operation_partition_categories():
     assert OP_REGISTRY["bool2_intersect"].partition == "null"
     assert OP_REGISTRY["bool_sum"].partition == "null"
     assert OP_REGISTRY["bool_mat_ident"].partition == "null"
+    assert OP_REGISTRY["partition_bool_subjects"].partition == "null"
     assert OP_REGISTRY["bool_cavity"].partition == "null"
 
 
