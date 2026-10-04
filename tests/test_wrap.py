@@ -370,7 +370,7 @@ def test_synth_v2_solves_before_pruning_each_gp_growth_iteration(
 
     events = []
 
-    def fake_solve(GP_meta, GP_X, SP_X, ST):
+    def fake_solve(*args, **kwargs):
         events.append("solve")
 
     def fake_gp_generate(GP_meta, GP_X, n_new_genes, *, rng=None, **kwargs):
