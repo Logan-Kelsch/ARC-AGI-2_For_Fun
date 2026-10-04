@@ -1,14 +1,133 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
 
 import numpy as np
 
-from .environment import ProgramX, SolutionTree
+from .environment import ProgramMeta, ProgramX, SolutionTree
 from .ops import genes_exactly_equal
 
+
+@dataclass
+class PairEvaluationMatrix:
+    """Boolean record of fully evaluated GP/SP gene pairs for one dimension."""
+
+    dims: int
+    gp_gene_ids: tuple[int, ...] = ()
+    sp_gene_ids: tuple[int, ...] = ()
+    matrix: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 0), dtype=bool),
+        repr=False,
+    )
+    _gp_pos: dict[int, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _sp_pos: dict[int, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        self.dims = int(self.dims)
+        if self.dims not in {0, 2}:
+            raise ValueError("PairEvaluationMatrix supports dims 0 or 2.")
+        self._reindex()
+        expected_shape = (len(self.gp_gene_ids), len(self.sp_gene_ids))
+        if self.matrix.shape != expected_shape:
+            raise ValueError(
+                "Evaluation matrix shape does not match its gene-ID axes."
+            )
+        if self.matrix.dtype != np.bool_:
+            self.matrix = np.asarray(self.matrix, dtype=bool)
+
+    def _reindex(self) -> None:
+        if len(set(self.gp_gene_ids)) != len(self.gp_gene_ids):
+            raise ValueError("GP gene IDs must be unique.")
+        if len(set(self.sp_gene_ids)) != len(self.sp_gene_ids):
+            raise ValueError("SP gene IDs must be unique.")
+
+        self._gp_pos = {
+            int(gene_id): position
+            for position, gene_id in enumerate(self.gp_gene_ids)
+        }
+        self._sp_pos = {
+            int(gene_id): position
+            for position, gene_id in enumerate(self.sp_gene_ids)
+        }
+
+    def sync(
+        self,
+        gp_gene_ids: list[int] | tuple[int, ...],
+        sp_gene_ids: list[int] | tuple[int, ...],
+    ) -> None:
+        """Match current live axes while preserving prior overlapping cells."""
+        new_gp = tuple(int(value) for value in gp_gene_ids)
+        new_sp = tuple(int(value) for value in sp_gene_ids)
+
+        if len(set(new_gp)) != len(new_gp):
+            raise ValueError("GP gene IDs must be unique.")
+        if len(set(new_sp)) != len(new_sp):
+            raise ValueError("SP gene IDs must be unique.")
+
+        new_matrix = np.zeros(
+            (len(new_gp), len(new_sp)),
+            dtype=bool,
+        )
+
+        old_gp_pos = dict(self._gp_pos)
+        old_sp_pos = dict(self._sp_pos)
+
+        common_gp = [gene_id for gene_id in new_gp if gene_id in old_gp_pos]
+        common_sp = [gene_id for gene_id in new_sp if gene_id in old_sp_pos]
+
+        if common_gp and common_sp:
+            old_rows = [old_gp_pos[gene_id] for gene_id in common_gp]
+            old_cols = [old_sp_pos[gene_id] for gene_id in common_sp]
+            new_gp_pos = {gene_id: i for i, gene_id in enumerate(new_gp)}
+            new_sp_pos = {gene_id: i for i, gene_id in enumerate(new_sp)}
+            new_rows = [new_gp_pos[gene_id] for gene_id in common_gp]
+            new_cols = [new_sp_pos[gene_id] for gene_id in common_sp]
+            new_matrix[np.ix_(new_rows, new_cols)] = self.matrix[
+                np.ix_(old_rows, old_cols)
+            ]
+
+        self.gp_gene_ids = new_gp
+        self.sp_gene_ids = new_sp
+        self.matrix = new_matrix
+        self._reindex()
+
+    def was_evaluated(self, gp_gene_id: int, sp_gene_id: int) -> bool:
+        return bool(
+            self.matrix[
+                self._gp_pos[int(gp_gene_id)],
+                self._sp_pos[int(sp_gene_id)],
+            ]
+        )
+
+    def mark_evaluated(self, gp_gene_id: int, sp_gene_id: int) -> None:
+        self.matrix[
+            self._gp_pos[int(gp_gene_id)],
+            self._sp_pos[int(sp_gene_id)],
+        ] = True
+
+
+@dataclass
+class SolveEvaluationCache:
+    """Persistent pair-evaluation matrices used across frontier passes."""
+
+    dim0: PairEvaluationMatrix = field(
+        default_factory=lambda: PairEvaluationMatrix(0)
+    )
+    dim2: PairEvaluationMatrix = field(
+        default_factory=lambda: PairEvaluationMatrix(2)
+    )
 
 @dataclass(frozen=True)
 class Scalar1GeneSolution:
@@ -399,6 +518,9 @@ def solve_0dim_1gene_basic(
     GP_X: ProgramX,
     SP_X: ProgramX,
     ST: SolutionTree,
+    GP_meta: ProgramMeta | None = None,
+    SP_meta: ProgramMeta | None = None,
+    evaluation_matrix: PairEvaluationMatrix | None = None,
 ) -> list[Scalar1GeneSolution]:
     """Solve unresolved scalar ST targets from one scalar GP gene.
 
@@ -468,6 +590,18 @@ def solve_0dim_1gene_basic(
         ST,
     )
 
+    if evaluation_matrix is not None:
+        if evaluation_matrix.dims != 0:
+            raise ValueError("0D solver requires a dims=0 evaluation matrix.")
+        if GP_meta is None or SP_meta is None:
+            raise ValueError(
+                "Cached evaluation requires GP_meta and SP_meta."
+            )
+        evaluation_matrix.sync(
+            [GP_meta.stable_id(gidx) for gidx, _ in gp_entries],
+            [SP_meta.stable_id(gidx) for gidx in target_sp_gidx],
+        )
+
     solved: list[Scalar1GeneSolution] = []
 
     for y_gene, sp_gidx in zip(
@@ -483,15 +617,43 @@ def solve_0dim_1gene_basic(
         exact_candidates = []
 
         for gp_gidx, x_gene in gp_entries:
+            gp_gene_id = (
+                None
+                if GP_meta is None
+                else GP_meta.stable_id(gp_gidx)
+            )
+            sp_gene_id = (
+                None
+                if SP_meta is None
+                else SP_meta.stable_id(sp_gidx)
+            )
+
+            if (
+                evaluation_matrix is not None
+                and evaluation_matrix.was_evaluated(
+                    gp_gene_id,
+                    sp_gene_id,
+                )
+            ):
+                continue
+
+            pair_matches = _candidate_rule_solutions(
+                x_gene,
+                y_gene,
+            )
+
+            if evaluation_matrix is not None:
+                evaluation_matrix.mark_evaluated(
+                    gp_gene_id,
+                    sp_gene_id,
+                )
+
             for (
                 level,
                 parameter_key,
                 rule,
                 params,
-            ) in _candidate_rule_solutions(
-                x_gene,
-                y_gene,
-            ):
+            ) in pair_matches:
                 exact_candidates.append(
                     (
                         level,
@@ -1233,6 +1395,9 @@ def solve_2dim_1gene_basic(
     GP_X: ProgramX,
     SP_X: ProgramX,
     ST: SolutionTree,
+    GP_meta: ProgramMeta | None = None,
+    SP_meta: ProgramMeta | None = None,
+    evaluation_matrix: PairEvaluationMatrix | None = None,
 ) -> list[Matrix1GeneSolution]:
     """Solve unresolved 2D ST targets from one 2D GP gene.
 
@@ -1303,6 +1468,18 @@ def solve_2dim_1gene_basic(
         ST,
     )
 
+    if evaluation_matrix is not None:
+        if evaluation_matrix.dims != 2:
+            raise ValueError("2D solver requires a dims=2 evaluation matrix.")
+        if GP_meta is None or SP_meta is None:
+            raise ValueError(
+                "Cached evaluation requires GP_meta and SP_meta."
+            )
+        evaluation_matrix.sync(
+            [GP_meta.stable_id(gidx) for gidx, _ in gp_entries],
+            [SP_meta.stable_id(gidx) for gidx in target_sp_gidx],
+        )
+
     solved: list[Matrix1GeneSolution] = []
 
     for y_gene, sp_gidx in zip(
@@ -1316,15 +1493,43 @@ def solve_2dim_1gene_basic(
         exact_candidates = []
 
         for gp_gidx, x_gene in gp_entries:
+            gp_gene_id = (
+                None
+                if GP_meta is None
+                else GP_meta.stable_id(gp_gidx)
+            )
+            sp_gene_id = (
+                None
+                if SP_meta is None
+                else SP_meta.stable_id(sp_gidx)
+            )
+
+            if (
+                evaluation_matrix is not None
+                and evaluation_matrix.was_evaluated(
+                    gp_gene_id,
+                    sp_gene_id,
+                )
+            ):
+                continue
+
+            pair_matches = _candidate_2d_rule_solutions(
+                x_gene,
+                y_gene,
+            )
+
+            if evaluation_matrix is not None:
+                evaluation_matrix.mark_evaluated(
+                    gp_gene_id,
+                    sp_gene_id,
+                )
+
             for (
                 level,
                 parameter_key,
                 rule,
                 params,
-            ) in _candidate_2d_rule_solutions(
-                x_gene,
-                y_gene,
-            ):
+            ) in pair_matches:
                 exact_candidates.append(
                     (
                         level,
