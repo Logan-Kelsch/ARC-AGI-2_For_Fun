@@ -128,17 +128,47 @@ def source_indices(source: SourceRef) -> tuple[int, ...]:
 
 @dataclass
 class ProgramMeta:
-    """Gene-parallel metadata for either GP or SP."""
+    """Gene-parallel metadata for either GP or SP.
+
+    gidx remains the live positional index used by ProgramX and source
+    references. gene_id is a stable identity allocated once when a gene is
+    appended. Stable IDs are never renumbered when GP pruning shifts gidx
+    positions, which makes them safe keys for cross-iteration caches.
+    """
 
     side: Side
     source: list[SourceRef] = field(default_factory=list)
     op: list[str] = field(default_factory=list)
     dims: list[int] = field(default_factory=list)
     params: list[dict[str, Any]] = field(default_factory=list)
+    gene_id: list[int] = field(default_factory=list)
+    _next_gene_id: int = field(
+        default=0,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.side not in {"GP", "SP"}:
             raise ValueError("ProgramMeta.side must be 'GP' or 'SP'.")
+
+        if self.gene_id:
+            if len(self.gene_id) != len(self.op):
+                raise ValueError(
+                    "ProgramMeta.gene_id must be parallel to op."
+                )
+            if len(set(self.gene_id)) != len(self.gene_id):
+                raise ValueError("ProgramMeta.gene_id values must be unique.")
+            self.gene_id = [int(value) for value in self.gene_id]
+        elif self.op:
+            self.gene_id = list(range(len(self.op)))
+
+        self._next_gene_id = (
+            max(self.gene_id) + 1
+            if self.gene_id
+            else 0
+        )
 
     def __len__(self) -> int:
         return len(self.op)
@@ -151,23 +181,32 @@ class ProgramMeta:
         dims: int,
         params: dict[str, Any] | None = None,
     ) -> int:
-        """Append metadata and return the newly allocated gene index."""
+        """Append metadata and return the newly allocated live gene index."""
         dims = int(dims)
         if dims < 0:
             raise ValueError("dims must be non-negative.")
 
         source = _normalize_source(source)
 
+        stable_id = self._next_gene_id
+        self._next_gene_id += 1
+
         self.source.append(source)
         self.op.append(str(op))
         self.dims.append(dims)
         self.params.append(dict(params or {}))
+        self.gene_id.append(stable_id)
 
         return len(self.op) - 1
+
+    def stable_id(self, gidx: int) -> int:
+        """Return the immutable identity of the live gene at gidx."""
+        return int(self.gene_id[gidx])
 
     def row(self, gidx: int) -> dict[str, Any]:
         return {
             "gidx": int(gidx),
+            "gene_id": self.stable_id(gidx),
             "source": self.source[gidx],
             "op": self.op[gidx],
             "dims": self.dims[gidx],
