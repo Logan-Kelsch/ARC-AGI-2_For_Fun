@@ -1624,6 +1624,59 @@ def test_gp_prune_validates_count_and_proportion():
         GP_prune(GP_meta, GP_X, ST, prune=1.1)
 
 
+def test_gp_stable_gene_ids_survive_pruning_and_are_not_renumbered():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    first = _append_test_gp_gene(
+        GP_meta,
+        GP_X,
+        source=1,
+        op="stable_id_first",
+        value=70,
+    )
+    second = _append_test_gp_gene(
+        GP_meta,
+        GP_X,
+        source=1,
+        op="stable_id_second",
+        value=71,
+    )
+
+    before = {
+        GP_meta.op[gidx]: GP_meta.stable_id(gidx)
+        for gidx in range(len(GP_meta))
+    }
+    max_before_id = max(GP_meta.gene_id)
+
+    removed = GP_prune(
+        GP_meta,
+        GP_X,
+        ST,
+        prune=1,
+        rng=0,
+    )
+
+    assert len(removed) == 1
+
+    after = {
+        GP_meta.op[gidx]: GP_meta.stable_id(gidx)
+        for gidx in range(len(GP_meta))
+    }
+
+    for op_name in set(before).intersection(after):
+        assert after[op_name] == before[op_name]
+
+    new_gidx = _append_test_gp_gene(
+        GP_meta,
+        GP_X,
+        source=1,
+        op="stable_id_after_prune",
+        value=72,
+    )
+    assert GP_meta.stable_id(new_gidx) > max_before_id
+    assert len(GP_meta.gene_id) == len(GP_meta) == len(GP_X)
+
+
 def test_gp_duplicate_retry_keeps_same_prior_until_100_failure_switch(capsys):
     attempts = [0]
 
