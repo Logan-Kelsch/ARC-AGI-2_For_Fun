@@ -21,6 +21,7 @@ from .environment import (
 from .kelschinator import Kelschinator
 from .ops import GP_generate, GP_prune, SP_generate
 from .solve import (
+    SolveEvaluationCache,
     solve_0dim_1gene_basic,
     solve_2dim_1gene_basic,
 )
@@ -157,10 +158,12 @@ def _operation_application_count(meta: ProgramMeta) -> int:
 def _solve_frontier(
     GP_meta: ProgramMeta,
     GP_X: ProgramX,
+    SP_meta: ProgramMeta,
     SP_X: ProgramX,
     ST: SolutionTree,
+    evaluation_cache: SolveEvaluationCache,
 ) -> None:
-    """Run every currently implemented exact one-gene matcher."""
+    """Run exact one-gene matchers without repeating completed pair checks."""
 
     if ST.solved:
         return
@@ -184,6 +187,9 @@ def _solve_frontier(
         GP_X=GP_X,
         SP_X=SP_X,
         ST=ST,
+        GP_meta=GP_meta,
+        SP_meta=SP_meta,
+        evaluation_matrix=evaluation_cache.dim0,
     )
 
     if ST.solved:
@@ -208,6 +214,9 @@ def _solve_frontier(
         GP_X=GP_X,
         SP_X=SP_X,
         ST=ST,
+        GP_meta=GP_meta,
+        SP_meta=SP_meta,
+        evaluation_matrix=evaluation_cache.dim2,
     )
 
 
@@ -443,14 +452,17 @@ def synth(
         else np.random.default_rng(rng)
     )
 
+    evaluation_cache = SolveEvaluationCache()
     iterations = 0
 
     # Initial semantics may already meet exactly before any random growth.
     _solve_frontier(
         GP_meta,
         GP_X,
+        SP_meta,
         SP_X,
         ST,
+        evaluation_cache,
     )
 
     while not ST.solved:
@@ -494,8 +506,10 @@ def synth(
         _solve_frontier(
             GP_meta,
             GP_X,
+            SP_meta,
             SP_X,
             ST,
+            evaluation_cache,
         )
 
         _print_iteration_status(
@@ -621,13 +635,16 @@ def synth_v2(
         else np.random.default_rng(rng)
     )
 
+    evaluation_cache = SolveEvaluationCache()
     iterations = 0
 
     _solve_frontier(
         GP_meta,
         GP_X,
+        SP_meta,
         SP_X,
         ST,
+        evaluation_cache,
     )
 
     while not ST.solved:
@@ -672,8 +689,10 @@ def synth_v2(
         _solve_frontier(
             GP_meta,
             GP_X,
+            SP_meta,
             SP_X,
             ST,
+            evaluation_cache,
         )
 
         if (
