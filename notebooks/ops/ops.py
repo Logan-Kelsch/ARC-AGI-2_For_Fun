@@ -686,6 +686,7 @@ def _validate_program_pair(meta: ProgramMeta, X: ProgramX) -> None:
         == len(meta.op)
         == len(meta.dims)
         == len(meta.params)
+        == len(meta.gene_id)
     ):
         raise ValueError(
             f"{meta.side} metadata fields are not parallel."
@@ -2143,6 +2144,7 @@ def _rollback_appended_genes(
     del meta.op[meta_len:]
     del meta.dims[meta_len:]
     del meta.params[meta_len:]
+    del meta.gene_id[meta_len:]
     del X.genes[x_len:]
 
 
@@ -2458,6 +2460,7 @@ def _delete_gp_gene(
     del GP_meta.op[gidx]
     del GP_meta.dims[gidx]
     del GP_meta.params[gidx]
+    del GP_meta.gene_id[gidx]
     del GP_X.genes[gidx]
 
     GP_meta.source[:] = [
