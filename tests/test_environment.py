@@ -1929,6 +1929,33 @@ def test_gp_generate_fast_allows_atomic_multioutput_overshoot():
     OP_REGISTRY.pop("test_fast_three_outputs", None)
 
 
+def test_fast_sampler_returns_info_source_params_contract_for_unary_op():
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.array([[True, False]], dtype=bool),
+            np.array([[False, True]], dtype=bool),
+        ],
+        raw_op="raw_input",
+    )
+
+    import notebooks.ops.ops as ops_module
+
+    candidate = ops_module._sample_uniform_legal_candidate_stochastic(
+        meta,
+        X,
+        rng=np.random.default_rng(0),
+        source_probe_attempts=4,
+        operation_names=("bool_cavity",),
+    )
+
+    assert candidate is not None
+    info, source_idx, params = candidate
+    assert info.name == "bool_cavity"
+    assert source_idx == 0
+    assert params == {}
+
+
 def test_fast_binary_source_sampling_avoids_exhaustive_pair_enumeration(
     monkeypatch,
 ):
