@@ -849,6 +849,17 @@ Kelschinator must be able to replay the discovered symbolic program and exactly 
 
 ---
 
+## GP generation batch semantics
+
+`gen_size_GP` / `n_new_genes` is a minimum growth objective, not a hard
+output ceiling. A selected operation is atomic: if the search still needs one
+gene to reach the objective and the operation naturally emits 30 genes, all 30
+are retained and that generation batch ends above the target.
+
+Initialization may also contain distinct genes with identical instantiated
+values. Solver pool/frontier mapping preserves those genes as separate
+identities instead of collapsing equal data onto the first matching gidx.
+
 ## Frontier evaluation cache
 
 The active synthesis wrappers keep two Boolean pair-evaluation matrices:
