@@ -2598,6 +2598,11 @@ def GP_generate(
     restarts from the same uniform operation/source priors rather than removing
     the rejected transition from future sampling.
 
+    n_new_genes is a minimum batch objective, not a hard cap. Operations are
+    atomic: if the next accepted operation emits more genes than remain in the
+    objective, every output is retained and the returned batch may overshoot
+    n_new_genes.
+
     The consecutive rejection counter resets after every accepted generation.
     Generation terminates after max_attempts_per_generation consecutive
     non-novel attempts.
@@ -2625,13 +2630,11 @@ def GP_generate(
     consecutive_failures = 0
 
     while len(generated) < n_new_genes:
-        remaining = n_new_genes - len(generated)
-
         candidate = _sample_uniform_legal_candidate(
             GP_meta,
             GP_X,
             rng=rng,
-            max_output_count=remaining,
+            max_output_count=None,
             operation_names=operation_names,
         )
 

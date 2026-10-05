@@ -559,3 +559,111 @@ def test_0d_evaluation_cache_skips_completed_pairs_and_only_evaluates_new_gp(
     assert evaluation_matrix.matrix.shape == (3, 1)
     assert np.all(evaluation_matrix.matrix)
 
+
+def test_0d_cache_preserves_distinct_ids_for_equal_valued_gp_genes():
+    GP_meta, GP_X = _scalar_gp(
+        [
+            [np.int64(2), np.int64(3), np.int64(4)],
+            [np.int64(2), np.int64(3), np.int64(4)],
+        ]
+    )
+    SP_meta, SP_X, ST = _scalar_sp(
+        [
+            [np.int64(100), np.int64(101), np.int64(105)],
+        ]
+    )
+    evaluation_matrix = PairEvaluationMatrix(0)
+
+    solved = solve_0dim_1gene_basic(
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+            min_dim=0,
+            max_dim=0,
+        ),
+        get_ST_unsovled_frontier(
+            ST,
+            SP_X,
+            min_dim=0,
+            max_dim=0,
+        ),
+        GP_X=GP_X,
+        SP_X=SP_X,
+        ST=ST,
+        GP_meta=GP_meta,
+        SP_meta=SP_meta,
+        evaluation_matrix=evaluation_matrix,
+    )
+
+    assert solved == []
+    assert evaluation_matrix.gp_gene_ids == (
+        GP_meta.stable_id(0),
+        GP_meta.stable_id(1),
+    )
+    assert evaluation_matrix.matrix.shape == (2, 1)
+    assert np.all(evaluation_matrix.matrix)
+
+
+def test_0d_cache_preserves_distinct_ids_for_equal_valued_sp_frontier_genes():
+    GP_meta, GP_X = _scalar_gp(
+        [
+            [np.int64(1), np.int64(2), np.int64(3)],
+        ]
+    )
+    SP_meta, SP_X, ST = _scalar_sp(
+        [
+            [np.int64(50), np.int64(60), np.int64(70)],
+            [np.int64(50), np.int64(60), np.int64(70)],
+        ]
+    )
+
+    from notebooks.ops.environment import STNode, STNodeRef, STSet
+
+    ST.roots = ("root_equal_targets",)
+    ST.nodes["root_equal_targets"] = STNode(
+        node_id="root_equal_targets",
+        label="root equal targets",
+        sp_gidx=None,
+        op="logical_test",
+        dims=0,
+        derivation=STSet(
+            mode="AND",
+            members=[
+                STNodeRef(0),
+                STNodeRef(1),
+            ],
+            partition="and",
+        ),
+    )
+
+    evaluation_matrix = PairEvaluationMatrix(0)
+    frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+
+    assert len(frontier) == 2
+
+    solve_0dim_1gene_basic(
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+            min_dim=0,
+            max_dim=0,
+        ),
+        frontier,
+        GP_X=GP_X,
+        SP_X=SP_X,
+        ST=ST,
+        GP_meta=GP_meta,
+        SP_meta=SP_meta,
+        evaluation_matrix=evaluation_matrix,
+    )
+
+    assert evaluation_matrix.sp_gene_ids == (
+        SP_meta.stable_id(0),
+        SP_meta.stable_id(1),
+    )
+

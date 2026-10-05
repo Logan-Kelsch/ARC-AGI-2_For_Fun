@@ -370,8 +370,9 @@ def synth(
         is then allowed on that side.
 
     gen_size_GP:
-        Passed directly to GP_generate(..., n_new_genes=gen_size_GP) on every
-        GP growth iteration.
+        Minimum GP growth objective passed to GP_generate on every GP growth
+        iteration. A selected multi-output operation is atomic, so one call may
+        return more than gen_size_GP genes.
 
     rng:
         Optional deterministic seed or NumPy Generator shared by GP/SP growth.

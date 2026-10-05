@@ -485,3 +485,54 @@ def test_2d_evaluation_cache_skips_completed_pair(monkeypatch):
     assert run() == []
     assert calls == 1
 
+
+def test_2d_cache_preserves_distinct_ids_for_equal_valued_gp_genes():
+    duplicate = [
+        np.array([[True, False]], dtype=bool),
+        np.array([[False, True]], dtype=bool),
+    ]
+    GP_meta, GP_X = _matrix_gp(
+        [
+            duplicate,
+            [value.copy() for value in duplicate],
+        ]
+    )
+    SP_meta, SP_X, ST = _matrix_sp(
+        [
+            [
+                np.array([[True, True]], dtype=bool),
+                np.array([[True, True]], dtype=bool),
+            ]
+        ]
+    )
+    evaluation_matrix = PairEvaluationMatrix(2)
+
+    solved = solve_2dim_1gene_basic(
+        get_GP_pool(
+            GP_meta,
+            GP_X,
+            min_dim=2,
+            max_dim=2,
+        ),
+        get_ST_unsovled_frontier(
+            ST,
+            SP_X,
+            min_dim=2,
+            max_dim=2,
+        ),
+        GP_X=GP_X,
+        SP_X=SP_X,
+        ST=ST,
+        GP_meta=GP_meta,
+        SP_meta=SP_meta,
+        evaluation_matrix=evaluation_matrix,
+    )
+
+    assert solved == []
+    assert evaluation_matrix.gp_gene_ids == (
+        GP_meta.stable_id(0),
+        GP_meta.stable_id(1),
+    )
+    assert evaluation_matrix.matrix.shape == (2, 1)
+    assert np.all(evaluation_matrix.matrix)
+
