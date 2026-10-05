@@ -24,6 +24,7 @@ from notebooks.ops.inv_ops import (
 )
 from notebooks.ops.ops import (
     GP_generate,
+    GP_generate_fast,
     GP_prune,
     OP_REGISTRY,
     SP_generate,
@@ -1881,6 +1882,102 @@ def test_gp_generate_target_allows_atomic_multioutput_overshoot():
     ] == [11, 21, 31]
 
     OP_REGISTRY.pop("test_three_outputs", None)
+
+
+def test_gp_generate_fast_allows_atomic_multioutput_overshoot():
+    @operation(
+        partition="null",
+        output_count=3,
+        min_dims_exclusive=-1,
+    )
+    def test_fast_three_outputs(meta, X, source_idx):
+        generated = []
+
+        for delta in (10, 20, 30):
+            values = [
+                np.asarray(value) + delta
+                for value in X[source_idx]
+            ]
+            gidx = X.append_gene(values)
+            meta.append(
+                source=source_idx,
+                op="test_fast_three_outputs",
+                dims=meta.dims[source_idx],
+            )
+            generated.append(gidx)
+
+        return tuple(generated)
+
+    meta, X = _raw_program(
+        "GP",
+        [np.int64(1), np.int64(2)],
+        raw_op="raw_input",
+    )
+
+    created = GP_generate_fast(
+        meta,
+        X,
+        1,
+        rng=0,
+        source_probe_attempts=4,
+        operation_names=("test_fast_three_outputs",),
+    )
+
+    assert len(created) == 3
+    assert len(meta) == len(X) == 4
+
+    OP_REGISTRY.pop("test_fast_three_outputs", None)
+
+
+def test_fast_binary_source_sampling_avoids_exhaustive_pair_enumeration(
+    monkeypatch,
+):
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=2)
+
+    values = [
+        [
+            np.array([[True, False]], dtype=bool),
+            np.array([[False, True]], dtype=bool),
+        ],
+        [
+            np.array([[False, True]], dtype=bool),
+            np.array([[True, False]], dtype=bool),
+        ],
+    ]
+
+    for index, gene_values in enumerate(values):
+        gidx = X.append_gene(gene_values)
+        meta.append(
+            source=-1,
+            op=f"raw_bool_{index}",
+            dims=2,
+        )
+        assert gidx == index
+
+    import notebooks.ops.ops as ops_module
+
+    monkeypatch.setattr(
+        ops_module,
+        "_valid_sources_for_operation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("exhaustive source enumeration was used")
+        ),
+    )
+
+    candidate = ops_module._sample_uniform_legal_candidate_stochastic(
+        meta,
+        X,
+        rng=np.random.default_rng(0),
+        source_probe_attempts=4,
+        operation_names=("bool2_union",),
+    )
+
+    assert candidate is not None
+    info, source_idx, params = candidate
+    assert info.name == "bool2_union"
+    assert source_idx == (0, 1)
+    assert params == {}
 
 
 def test_gp_generate_zero_is_noop():

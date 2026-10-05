@@ -872,6 +872,44 @@ entire GP pool for every selected GP gene (quadratic pool remapping as GP
 grew). The original data-only pool/frontier helpers remain available for
 notebooks and backward-compatible direct solver use.
 
+## synth_v3 fast stochastic source sampling
+
+`synth_v3` keeps the v2 generation / solve / prune loop but uses
+`GP_generate_fast` for GP growth. Rather than materializing every legal
+source tuple for every registered operation, the generator proposes sources
+from the existing provenance-weighted distribution and rejects illegal
+proposals.
+
+For multi-source operations, component proposal weights are chosen so that the
+resulting tuple probability is exactly proportional to the existing tuple
+softmax score. Conditioning by rejection on semantic legality therefore
+preserves the current legal-source distribution.
+
+`source_probe_attempts` defaults to 32. If no legal source is found within
+that many proposals for an operation, the legacy exhaustive enumerator is used
+once as a correctness fallback. This avoids false exhaustion while keeping the
+normal path free of O(G^2) source-pair materialization.
+
+`verbosity=3` prints GP generation, SP generation, frontier solve, and pruning
+timings separately for each iteration.
+
+Notebook swap:
+
+```python
+from notebooks.ops import synth_v3
+
+result = synth_v3(
+    task_id,
+    max_GP=1000,
+    max_SP=1000,
+    gen_size_GP=10,
+    prune_size_GP=5,
+    source_probe_attempts=32,
+    rng=0,
+    verbosity=3,
+)
+```
+
 ## Frontier evaluation cache
 
 The active synthesis wrappers keep two Boolean pair-evaluation matrices:
