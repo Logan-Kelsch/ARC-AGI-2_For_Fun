@@ -163,24 +163,19 @@ class GrammarUCTPolicy:
 
     def operation_score(self, op_name: str) -> tuple[float, float, float]:
         stat = self.operation_stats.get(op_name, UCTStat())
-        total = sum(
-            candidate.visits
-            for candidate in self.operation_stats.values()
+        return self._uct_score(
+            stat,
+            total_visits=self.total_decisions,
         )
-        return self._uct_score(stat, total_visits=total)
 
     def source_score(
         self,
         key: GrammarSourceKey,
     ) -> tuple[float, float, float]:
         stat = self.source_stats.get(key, UCTStat())
-        total = sum(
-            candidate.visits
-            for candidate in self.source_stats.values()
-        )
         return self._uct_score(
             stat,
-            total_visits=total,
+            total_visits=self.total_decisions,
             source_depth=key.source_depth,
         )
 
@@ -351,6 +346,9 @@ class _TaskUCTState:
     coverage_queue: deque[_CoverageCandidate]
     gene_to_decision: dict[int, int] = field(default_factory=dict)
     decisions: dict[int, _DecisionRecord] = field(default_factory=dict)
+    attempted_transitions: set[tuple[str, tuple[int, ...], str]] = field(
+        default_factory=set
+    )
 
     @classmethod
     def initialize(
@@ -438,6 +436,65 @@ class _TaskUCTState:
             source_dims=tuple(item[0] for item in components),
             source_dtypes=tuple(item[1] for item in components),
             source_shapes=tuple(item[2] for item in components),
+        )
+
+    def transition_token(
+        self,
+        GP_meta: ProgramMeta,
+        info: OperationInfo,
+        source_idx: Any,
+        params: dict[str, Any],
+    ) -> tuple[str, tuple[int, ...], str]:
+        source_gene_ids = tuple(
+            GP_meta.stable_id(int(gidx))
+            for gidx in _source_tuple(source_idx)
+        )
+
+        if not info.ordered_sources:
+            source_gene_ids = tuple(sorted(source_gene_ids))
+
+        params_token = json.dumps(
+            params,
+            sort_keys=True,
+            default=repr,
+        )
+        return (
+            info.name,
+            source_gene_ids,
+            params_token,
+        )
+
+    def has_attempted(
+        self,
+        GP_meta: ProgramMeta,
+        info: OperationInfo,
+        source_idx: Any,
+        params: dict[str, Any],
+    ) -> bool:
+        return (
+            self.transition_token(
+                GP_meta,
+                info,
+                source_idx,
+                params,
+            )
+            in self.attempted_transitions
+        )
+
+    def mark_attempted(
+        self,
+        GP_meta: ProgramMeta,
+        info: OperationInfo,
+        source_idx: Any,
+        params: dict[str, Any],
+    ) -> None:
+        self.attempted_transitions.add(
+            self.transition_token(
+                GP_meta,
+                info,
+                source_idx,
+                params,
+            )
         )
 
     def register_generation(
@@ -791,6 +848,14 @@ def _select_source_for_operation(
         )
 
         for _, _, gidx, key in ranked:
+            if task_state.has_attempted(
+                GP_meta,
+                info,
+                gidx,
+                params,
+            ):
+                continue
+
             if valid_generation(
                 GP_meta,
                 GP_X,
@@ -798,7 +863,20 @@ def _select_source_for_operation(
                 gidx,
                 params=params,
             ):
+                task_state.mark_attempted(
+                    GP_meta,
+                    info,
+                    gidx,
+                    params,
+                )
                 return gidx, key
+
+            task_state.mark_attempted(
+                GP_meta,
+                info,
+                gidx,
+                params,
+            )
 
         return None
 
@@ -832,6 +910,14 @@ def _select_source_for_operation(
         if not info.ordered_sources:
             source = tuple(sorted(source))
 
+        if task_state.has_attempted(
+            GP_meta,
+            info,
+            source,
+            params,
+        ):
+            continue
+
         if not valid_generation(
             GP_meta,
             GP_X,
@@ -839,8 +925,20 @@ def _select_source_for_operation(
             source,
             params=params,
         ):
+            task_state.mark_attempted(
+                GP_meta,
+                info,
+                source,
+                params,
+            )
             continue
 
+        task_state.mark_attempted(
+            GP_meta,
+            info,
+            source,
+            params,
+        )
         key = task_state.source_key(
             GP_meta,
             GP_X,
@@ -895,6 +993,14 @@ def _next_uct_candidate(
         )
         params = sample_operation_params(info, rng)
 
+        if task_state.has_attempted(
+            GP_meta,
+            info,
+            source_idx,
+            params,
+        ):
+            continue
+
         if not valid_generation(
             GP_meta,
             GP_X,
@@ -902,8 +1008,20 @@ def _next_uct_candidate(
             source_idx,
             params=params,
         ):
+            task_state.mark_attempted(
+                GP_meta,
+                info,
+                source_idx,
+                params,
+            )
             continue
 
+        task_state.mark_attempted(
+            GP_meta,
+            info,
+            source_idx,
+            params,
+        )
         key = task_state.source_key(
             GP_meta,
             GP_X,
