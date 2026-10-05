@@ -1013,6 +1013,7 @@ def test_program_meta_rows_and_program_x_object_matrix_are_easy_to_inspect():
 
     assert rows[0] == {
         "gidx": 0,
+        "gene_id": 0,
         "source": -1,
         "op": "raw_input",
         "dims": 2,
