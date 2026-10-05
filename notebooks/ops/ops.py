@@ -2044,6 +2044,303 @@ def _source_selection_probabilities(
     return exp_scores / np.sum(exp_scores)
 
 
+def _static_source_indices(
+    meta: ProgramMeta,
+    X: ProgramX,
+    info: OperationInfo,
+) -> list[int]:
+    """Filter source genes by cheap per-gene constraints only.
+
+    This intentionally excludes transition-existence and custom-validator
+    checks. Those are handled by rejection sampling after proposing a source.
+    """
+    candidates: list[int] = []
+
+    for gidx in range(len(X)):
+        source_dims = meta.dims[gidx]
+
+        if (
+            info.min_dims_exclusive is not None
+            and source_dims <= info.min_dims_exclusive
+        ):
+            continue
+
+        if (
+            info.allowed_dims is not None
+            and source_dims not in info.allowed_dims
+        ):
+            continue
+
+        if info.atomic_dtypes is not None:
+            actual_dtypes = set(gene_atomic_dtypes(X, gidx))
+            allowed_dtypes = set(info.atomic_dtypes)
+
+            if (
+                not actual_dtypes
+                or not actual_dtypes.issubset(allowed_dtypes)
+            ):
+                continue
+
+        candidates.append(gidx)
+
+    return candidates
+
+
+def _source_component_probabilities(
+    meta: ProgramMeta,
+    candidate_indices: list[int],
+    *,
+    source_count: int,
+) -> np.ndarray:
+    """Proposal probabilities whose tuple product matches source softmax.
+
+    For an m-source candidate the existing tuple score is the mean of the
+    component scores. Therefore:
+
+        exp(mean(score_i)) = product(exp(score_i / m))
+
+    Sampling each component from exp(score_i / m), then conditioning on
+    distinct indices and later on semantic legality, exactly recovers the
+    current provenance-softmax distribution over legal source tuples.
+    """
+    if not candidate_indices:
+        return np.empty(0, dtype=float)
+    if source_count < 1:
+        raise ValueError("source_count must be >= 1.")
+
+    operation_count = len(OP_REGISTRY)
+
+    if operation_count < 1:
+        raise RuntimeError("OP_REGISTRY must contain at least one operation.")
+
+    scores = np.asarray(
+        [
+            _candidate_source_score(
+                meta,
+                gidx,
+                operation_count=operation_count,
+            )
+            / float(source_count)
+            for gidx in candidate_indices
+        ],
+        dtype=float,
+    )
+
+    exp_scores = np.exp(scores - np.max(scores))
+    return exp_scores / np.sum(exp_scores)
+
+
+def _sample_weighted_source_proposal(
+    meta: ProgramMeta,
+    X: ProgramX,
+    info: OperationInfo,
+    *,
+    rng: np.random.Generator,
+    static_candidates: list[int] | None = None,
+    component_probabilities: np.ndarray | None = None,
+) -> Any | None:
+    """Sample one source/source-tuple without enumerating combinations."""
+    candidates = (
+        _static_source_indices(meta, X, info)
+        if static_candidates is None
+        else static_candidates
+    )
+
+    if len(candidates) < info.source_count:
+        return None
+
+    probabilities = (
+        _source_component_probabilities(
+            meta,
+            candidates,
+            source_count=info.source_count,
+        )
+        if component_probabilities is None
+        else component_probabilities
+    )
+
+    if info.source_count == 1:
+        position = int(
+            rng.choice(
+                len(candidates),
+                p=probabilities,
+            )
+        )
+        return candidates[position]
+
+    # IID categorical draws conditioned on all indices being distinct produce
+    # tuple mass proportional to product(component weights). For unordered
+    # operations every permutation of a set has the same product, so sorting
+    # preserves the desired unordered source distribution.
+    while True:
+        positions = rng.choice(
+            len(candidates),
+            size=info.source_count,
+            replace=True,
+            p=probabilities,
+        )
+
+        if len(set(int(position) for position in positions)) < info.source_count:
+            continue
+
+        source = tuple(
+            candidates[int(position)]
+            for position in positions
+        )
+
+        if not info.ordered_sources:
+            source = tuple(sorted(source))
+
+        return source
+
+
+def _sample_valid_source_for_operation_stochastic(
+    meta: ProgramMeta,
+    X: ProgramX,
+    info: OperationInfo,
+    *,
+    params: dict[str, Any],
+    rng: np.random.Generator,
+    source_probe_attempts: int,
+    max_output_count: int | None = None,
+) -> Any | None:
+    """Sample one legal source with rejection, falling back only if needed.
+
+    The fast path never materializes all source tuples. If stochastic probing
+    cannot find a valid source, the exhaustive legacy path runs once to
+    distinguish a genuinely exhausted operation from a rare-valid-source case.
+    The fallback also preserves exact operation-legality semantics.
+    """
+    static_candidates = _static_source_indices(meta, X, info)
+
+    if len(static_candidates) < info.source_count:
+        return None
+
+    probabilities = _source_component_probabilities(
+        meta,
+        static_candidates,
+        source_count=info.source_count,
+    )
+
+    for _ in range(source_probe_attempts):
+        source_idx = _sample_weighted_source_proposal(
+            meta,
+            X,
+            info,
+            rng=rng,
+            static_candidates=static_candidates,
+            component_probabilities=probabilities,
+        )
+
+        if source_idx is None:
+            return None
+
+        if not valid_generation(
+            meta,
+            X,
+            info,
+            source_idx,
+            params=params,
+        ):
+            continue
+
+        if (
+            max_output_count is not None
+            and operation_output_count(
+                info,
+                meta,
+                X,
+                source_idx,
+                params=params,
+            ) > max_output_count
+        ):
+            continue
+
+        return source_idx
+
+    # Rare or exhausted source spaces fall back to the exact legacy enumerator.
+    valid_sources = _valid_sources_for_operation(
+        meta,
+        X,
+        info,
+        params=params,
+        max_output_count=max_output_count,
+    )
+
+    if not valid_sources:
+        return None
+
+    source_probabilities = _source_selection_probabilities(
+        meta,
+        valid_sources,
+    )
+    return valid_sources[
+        int(
+            rng.choice(
+                len(valid_sources),
+                p=source_probabilities,
+            )
+        )
+    ]
+
+
+def _sample_uniform_legal_candidate_stochastic(
+    meta: ProgramMeta,
+    X: ProgramX,
+    *,
+    rng: np.random.Generator,
+    source_probe_attempts: int = 32,
+    max_output_count: int | None = None,
+    operation_names: Iterable[str] | None = None,
+) -> tuple[OperationInfo, Any, dict[str, Any]] | None:
+    """Uniformly sample a legal operation without enumerating source lattices.
+
+    Every operation is still represented once in the first-stage uniform draw.
+    For each operation, one legal source is drawn from the same provenance
+    softmax distribution as the exhaustive sampler, but via rejection sampling.
+    Exhaustive enumeration is used only as a correctness fallback after the
+    configured number of failed source probes.
+    """
+    if (
+        isinstance(source_probe_attempts, bool)
+        or int(source_probe_attempts) < 1
+    ):
+        raise ValueError("source_probe_attempts must be a positive integer.")
+
+    source_probe_attempts = int(source_probe_attempts)
+    legal_operations: list[
+        tuple[OperationInfo, dict[str, Any], Any]
+    ] = []
+
+    for info in _eligible_operation_infos(
+        side=meta.side,
+        max_output_count=max_output_count,
+        operation_names=operation_names,
+    ):
+        params = sample_operation_params(info, rng)
+        source_idx = _sample_valid_source_for_operation_stochastic(
+            meta,
+            X,
+            info,
+            params=params,
+            rng=rng,
+            source_probe_attempts=source_probe_attempts,
+            max_output_count=max_output_count,
+        )
+
+        if source_idx is not None:
+            legal_operations.append(
+                (info, params, source_idx)
+            )
+
+    if not legal_operations:
+        return None
+
+    return legal_operations[
+        int(rng.integers(len(legal_operations)))
+    ]
+
+
 def _sample_uniform_legal_candidate(
     meta: ProgramMeta,
     X: ProgramX,
@@ -2634,6 +2931,101 @@ def GP_generate(
             GP_meta,
             GP_X,
             rng=rng,
+            max_output_count=None,
+            operation_names=operation_names,
+        )
+
+        if candidate is None:
+            print(_no_legal_candidate_message("GP"))
+            break
+
+        info, source_idx, params = candidate
+
+        new_indices, _ = _try_candidate_transactionally(
+            GP_meta,
+            GP_X,
+            info,
+            source_idx,
+            params,
+        )
+
+        if new_indices:
+            generated.extend(new_indices)
+            consecutive_failures = 0
+            continue
+
+        consecutive_failures += 1
+
+        if (
+            consecutive_failures
+            >= max_attempts_per_generation
+        ):
+            print(
+                _stochastic_failure_message(
+                    "GP",
+                    consecutive_failures,
+                )
+            )
+            break
+
+    return generated
+
+
+def GP_generate_fast(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    n_new_genes: int,
+    *,
+    rng: np.random.Generator | int | None = None,
+    max_attempts_per_generation: int = 100,
+    source_probe_attempts: int = 32,
+    operation_names: Iterable[str] | None = None,
+) -> list[int]:
+    """Generate GP genes using stochastic source proposals.
+
+    Semantics match GP_generate:
+      - uniformly choose among legal operations;
+      - source choice follows the same provenance softmax;
+      - rejected duplicate/empty outputs are rolled back;
+      - n_new_genes is a minimum objective and atomic operations may overshoot.
+
+    Unlike GP_generate, multi-source candidates are proposed stochastically
+    instead of materializing every source tuple for every operation.
+    """
+    _validate_program_pair(GP_meta, GP_X)
+
+    if GP_meta.side != "GP":
+        raise ValueError("GP_generate_fast requires GP-side meta/X.")
+    if isinstance(n_new_genes, bool) or int(n_new_genes) < 0:
+        raise ValueError("n_new_genes must be a non-negative integer.")
+    if (
+        isinstance(max_attempts_per_generation, bool)
+        or int(max_attempts_per_generation) < 1
+    ):
+        raise ValueError(
+            "max_attempts_per_generation must be a positive integer."
+        )
+    if (
+        isinstance(source_probe_attempts, bool)
+        or int(source_probe_attempts) < 1
+    ):
+        raise ValueError("source_probe_attempts must be a positive integer.")
+
+    n_new_genes = int(n_new_genes)
+    max_attempts_per_generation = int(
+        max_attempts_per_generation
+    )
+    source_probe_attempts = int(source_probe_attempts)
+    rng = _rng(rng)
+    generated: list[int] = []
+    consecutive_failures = 0
+
+    while len(generated) < n_new_genes:
+        candidate = _sample_uniform_legal_candidate_stochastic(
+            GP_meta,
+            GP_X,
+            rng=rng,
+            source_probe_attempts=source_probe_attempts,
             max_output_count=None,
             operation_names=operation_names,
         )
