@@ -19,7 +19,7 @@ from .environment import (
     init_env,
 )
 from .kelschinator import Kelschinator
-from .ops import GP_generate, GP_prune, SP_generate
+from .ops import GP_generate, GP_generate_fast, GP_prune, SP_generate
 from .solve import (
     SolveEvaluationCache,
     solve_0dim_1gene_basic,
@@ -736,6 +736,217 @@ def synth_v2(
             GP_X=GP_X,
             SP_X=SP_X,
         )
+
+    kelschinator = Kelschinator()
+    solved_exactly = False
+
+    if ST.solved and kelschinator.fit(ST):
+        solved_exactly = _exact_test_match(
+            task,
+            kelschinator,
+        )
+
+    return (
+        solved_exactly,
+        kelschinator,
+        len(GP_X),
+        len(SP_X),
+        _operation_application_count(GP_meta),
+        _operation_application_count(SP_meta),
+        iterations,
+    )
+
+
+def synth_v3(
+    task_id: str,
+    max_GP: int = 1000,
+    max_SP: int = 1000,
+    gen_size_GP: int = 10,
+    prune_size_GP: int = 5,
+    *,
+    source_probe_attempts: int = 32,
+    rng: np.random.Generator | int | None = None,
+    data_root: str | Path | None = None,
+    split: str | None = None,
+    select_residual_max_destinations: int = 5,
+    verbosity: int = 0,
+) -> tuple[
+    bool,
+    Kelschinator,
+    int,
+    int,
+    int,
+    int,
+    int,
+]:
+    """Run v2 search with stochastic source sampling for GP generation.
+
+    Parameters match synth_v2 with one additional control:
+
+    source_probe_attempts:
+        Number of weighted source proposals attempted for each operation before
+        falling back to exhaustive source enumeration. Default is 32.
+
+    verbosity:
+        0 = silent
+        1 = total iteration time
+        2 = total time plus ST/GP/SP progress
+        3 = level 2 plus GP generation, SP generation, solve, and prune times
+    """
+    for name, value in (
+        ("max_GP", max_GP),
+        ("max_SP", max_SP),
+        ("gen_size_GP", gen_size_GP),
+        ("prune_size_GP", prune_size_GP),
+        ("source_probe_attempts", source_probe_attempts),
+    ):
+        if isinstance(value, bool) or int(value) < 0:
+            raise ValueError(
+                f"{name} must be a non-negative integer."
+            )
+
+    max_GP = int(max_GP)
+    max_SP = int(max_SP)
+    gen_size_GP = int(gen_size_GP)
+    prune_size_GP = int(prune_size_GP)
+    source_probe_attempts = int(source_probe_attempts)
+
+    if source_probe_attempts < 1:
+        raise ValueError("source_probe_attempts must be a positive integer.")
+
+    if isinstance(verbosity, bool) or verbosity not in {0, 1, 2, 3}:
+        raise ValueError("verbosity must be one of 0, 1, 2, or 3.")
+
+    gp_exhausted = gen_size_GP == 0 and max_GP > 0
+    sp_exhausted = False
+
+    task = _load_task_by_id(
+        task_id,
+        data_root=data_root,
+        split=split,
+    )
+
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(
+        task.train,
+        select_residual_max_destinations=(
+            select_residual_max_destinations
+        ),
+    )
+
+    rng = (
+        rng
+        if isinstance(rng, np.random.Generator)
+        else np.random.default_rng(rng)
+    )
+
+    evaluation_cache = SolveEvaluationCache()
+    iterations = 0
+
+    _solve_frontier(
+        GP_meta,
+        GP_X,
+        SP_meta,
+        SP_X,
+        ST,
+        evaluation_cache,
+    )
+
+    while not ST.solved:
+        can_grow_gp = (
+            not gp_exhausted
+            and len(GP_X) < max_GP
+        )
+        can_grow_sp = (
+            not sp_exhausted
+            and len(SP_X) < max_SP
+        )
+
+        if not can_grow_gp and not can_grow_sp:
+            break
+
+        iterations += 1
+        iteration_started = perf_counter()
+        generated_gp: list[int] = []
+
+        gp_started = perf_counter()
+        if can_grow_gp:
+            generated_gp = GP_generate_fast(
+                GP_meta,
+                GP_X,
+                n_new_genes=gen_size_GP,
+                rng=rng,
+                source_probe_attempts=source_probe_attempts,
+            )
+
+            if not generated_gp:
+                gp_exhausted = True
+        gp_seconds = perf_counter() - gp_started
+
+        sp_started = perf_counter()
+        if can_grow_sp and not ST.solved:
+            generated_sp = SP_generate(
+                SP_meta,
+                SP_X,
+                ST,
+                rng=rng,
+            )
+
+            if not generated_sp:
+                sp_exhausted = True
+        sp_seconds = perf_counter() - sp_started
+
+        solve_started = perf_counter()
+        _solve_frontier(
+            GP_meta,
+            GP_X,
+            SP_meta,
+            SP_X,
+            ST,
+            evaluation_cache,
+        )
+        solve_seconds = perf_counter() - solve_started
+
+        prune_started = perf_counter()
+        if (
+            generated_gp
+            and prune_size_GP > 0
+            and not ST.solved
+        ):
+            GP_prune(
+                GP_meta,
+                GP_X,
+                ST,
+                prune=prune_size_GP,
+                rng=rng,
+            )
+        prune_seconds = perf_counter() - prune_started
+
+        elapsed = perf_counter() - iteration_started
+
+        if verbosity <= 2:
+            _print_iteration_status(
+                verbosity=verbosity,
+                iteration=iterations,
+                elapsed_seconds=elapsed,
+                ST=ST,
+                GP_X=GP_X,
+                SP_X=SP_X,
+            )
+        else:
+            solved_nodes, total_nodes, proportion = _st_progress(ST)
+            print(
+                f"[iter {iterations}] "
+                f"{elapsed:.3f}s | "
+                f"GPgen={gp_seconds:.3f}s | "
+                f"SPgen={sp_seconds:.3f}s | "
+                f"solve={solve_seconds:.3f}s | "
+                f"prune={prune_seconds:.3f}s | "
+                f"solved={ST.solved} | "
+                f"ST={solved_nodes}/{total_nodes} "
+                f"({proportion:.1%}) | "
+                f"GP={len(GP_X)} | "
+                f"SP={len(SP_X)}"
+            )
 
     kelschinator = Kelschinator()
     solved_exactly = False
