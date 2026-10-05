@@ -7,6 +7,7 @@ import pytest
 
 from notebooks.ops import synth, synth_v2
 from notebooks.ops.environment import ProgramMeta, init_env
+import notebooks.ops.solve as solve_module
 import notebooks.ops.wrap as wrap_module
 from notebooks.ops.wrap import (
     _operation_application_count,
@@ -298,6 +299,41 @@ def test_synth_rejects_invalid_verbosity_before_task_loading():
         match="verbosity must be one of 0, 1, or 2",
     ):
         synth("does-not-matter", verbosity=3)
+
+def test_solve_frontier_never_uses_equality_identity_recovery(monkeypatch):
+    GP_meta, GP_X, SP_meta, SP_X, ST = _status_env()
+
+    monkeypatch.setattr(
+        solve_module,
+        "_map_pool_to_gp_gidx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy GP equality mapping was called")
+        ),
+    )
+    monkeypatch.setattr(
+        solve_module,
+        "_map_frontier_to_sp_gidx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy 0D SP equality mapping was called")
+        ),
+    )
+    monkeypatch.setattr(
+        solve_module,
+        "_map_2d_frontier_to_sp_gidx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy 2D SP equality mapping was called")
+        ),
+    )
+
+    wrap_module._solve_frontier(
+        GP_meta,
+        GP_X,
+        SP_meta,
+        SP_X,
+        ST,
+        solve_module.SolveEvaluationCache(),
+    )
+
 
 def test_synth_v2_identity_matches_synth_without_entering_loop(tmp_path):
     task_id = "identity_task_v2"
