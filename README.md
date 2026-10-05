@@ -1081,10 +1081,12 @@ The central research principle is:
 task-local GP/SP/ST state transient while carrying UCT statistics across ARC
 training tasks.
 
-The crawl starts each task with deterministic depth-0 coverage over the fixed
-initial GP pool. Legal operation/source combinations are considered from low
-source index upward before learned selection takes over. Generated genes are
-depth 1+, and later selection is operation-first:
+The crawl begins exploration with depth-0 coverage over the fixed initial GP
+pool. Legal operation/source combinations are considered from low source index
+upward before learned selection takes over. The forced-coverage probability is
+`min(1, C)`: it is 100% while the global exploration coefficient is above 1,
+and is about 5% once `C` reaches 0.05. Generated genes are depth 1+, and later
+selection is operation-first:
 
 ```text
 depth-0 coverage
