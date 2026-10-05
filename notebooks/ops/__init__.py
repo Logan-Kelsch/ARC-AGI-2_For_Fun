@@ -1,4 +1,12 @@
 from .wrap import synth, synth_v2, synth_v3
+from .crawl import (
+    CrawlResult,
+    CrawlTaskAttempt,
+    GrammarSourceKey,
+    GrammarUCTPolicy,
+    UCTStat,
+    crawl_synth_v1,
+)
 from .kelschinator import (
     Kelschinator,
     KelschinatorCompileError,
@@ -121,6 +129,12 @@ __all__ = [
     "synth",
     "synth_v2",
     "synth_v3",
+    "crawl_synth_v1",
+    "GrammarUCTPolicy",
+    "GrammarSourceKey",
+    "UCTStat",
+    "CrawlTaskAttempt",
+    "CrawlResult",
     "Kelschinator",
     "KelschinatorCompileError",
     "ProgramMeta",
