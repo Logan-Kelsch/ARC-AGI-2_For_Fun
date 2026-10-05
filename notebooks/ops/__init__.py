@@ -75,7 +75,9 @@ from .ops import (
 )
 from .solve import (
     Matrix1GeneSolution,
+    PairEvaluationMatrix,
     Scalar1GeneSolution,
+    SolveEvaluationCache,
     solve_0dim_1gene_basic,
     solve_2dim_1gene_basic,
 )
@@ -181,7 +183,9 @@ __all__ = [
     "partition_select_residual",
     "SelectResidualPartition",
     "Scalar1GeneSolution",
+    "SolveEvaluationCache",
     "Matrix1GeneSolution",
+    "PairEvaluationMatrix",
     "solve_0dim_1gene_basic",
     "solve_2dim_1gene_basic",
     "DEFAULT_ABS_KERNELS",

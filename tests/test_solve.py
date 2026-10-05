@@ -11,7 +11,11 @@ from notebooks.ops.environment import (
     get_GP_pool,
     get_ST_unsovled_frontier,
 )
-from notebooks.ops.solve import solve_0dim_1gene_basic
+import notebooks.ops.solve as solve_module
+from notebooks.ops.solve import (
+    PairEvaluationMatrix,
+    solve_0dim_1gene_basic,
+)
 
 
 def _scalar_gp(genes):
@@ -456,3 +460,102 @@ def test_solver_rejects_non_0dim_pool_data():
             SP_X=SP_X,
             ST=ST,
         )
+
+
+def test_pair_evaluation_matrix_sync_preserves_only_stable_id_overlap():
+    matrix = PairEvaluationMatrix(0)
+
+    matrix.sync([10, 11], [20])
+    matrix.mark_evaluated(10, 20)
+
+    matrix.sync([10, 11, 12], [20, 21])
+
+    assert matrix.gp_gene_ids == (10, 11, 12)
+    assert matrix.sp_gene_ids == (20, 21)
+    assert matrix.matrix.shape == (3, 2)
+    assert matrix.was_evaluated(10, 20)
+    assert not matrix.was_evaluated(11, 20)
+    assert not matrix.was_evaluated(12, 20)
+    assert not matrix.was_evaluated(10, 21)
+
+    matrix.sync([11, 12], [20, 21])
+
+    assert matrix.gp_gene_ids == (11, 12)
+    assert matrix.matrix.shape == (2, 2)
+    assert not np.any(matrix.matrix)
+
+
+def test_0d_evaluation_cache_skips_completed_pairs_and_only_evaluates_new_gp(
+    monkeypatch,
+):
+    GP_meta, GP_X = _scalar_gp(
+        [
+            [np.int64(1), np.int64(2), np.int64(3)],
+            [np.int64(4), np.int64(5), np.int64(6)],
+        ]
+    )
+    SP_meta, SP_X, ST = _scalar_sp(
+        [
+            [np.int64(100), np.int64(101), np.int64(105)],
+        ]
+    )
+
+    evaluation_matrix = PairEvaluationMatrix(0)
+    calls = 0
+    original = solve_module._candidate_rule_solutions
+
+    def counted(x_gene, y_gene):
+        nonlocal calls
+        calls += 1
+        return original(x_gene, y_gene)
+
+    monkeypatch.setattr(
+        solve_module,
+        "_candidate_rule_solutions",
+        counted,
+    )
+
+    def run():
+        return solve_0dim_1gene_basic(
+            get_GP_pool(
+                GP_meta,
+                GP_X,
+                min_dim=0,
+                max_dim=0,
+            ),
+            get_ST_unsovled_frontier(
+                ST,
+                SP_X,
+                min_dim=0,
+                max_dim=0,
+            ),
+            GP_X=GP_X,
+            SP_X=SP_X,
+            ST=ST,
+            GP_meta=GP_meta,
+            SP_meta=SP_meta,
+            evaluation_matrix=evaluation_matrix,
+        )
+
+    assert run() == []
+    assert calls == 2
+    assert evaluation_matrix.matrix.shape == (2, 1)
+    assert np.all(evaluation_matrix.matrix)
+
+    assert run() == []
+    assert calls == 2
+
+    GP_X.append_gene(
+        [np.int64(7), np.int64(8), np.int64(10)]
+    )
+    GP_meta.append(
+        source=0,
+        op="new_gp",
+        dims=0,
+    )
+
+    assert run() == []
+    assert calls == 3
+    assert evaluation_matrix.matrix.shape == (3, 1)
+    assert np.all(evaluation_matrix.matrix)
+

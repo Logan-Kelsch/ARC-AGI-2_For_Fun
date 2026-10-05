@@ -849,6 +849,24 @@ Kelschinator must be able to replay the discovered symbolic program and exactly 
 
 ---
 
+## Frontier evaluation cache
+
+The active synthesis wrappers keep two Boolean pair-evaluation matrices:
+
+- 0D GP genes x unresolved 0D SP frontier genes
+- 2D GP genes x unresolved 2D SP frontier genes
+
+A True cell means that GP/SP pair has already completed the full currently
+registered one-gene evaluation hierarchy for that dimensionality. Later
+frontier passes skip True cells and only evaluate newly introduced row/column
+pairs.
+
+ProgramMeta assigns every gene a stable integer gene_id in addition to its live
+gidx. gidx may shift when GP_prune removes a gene; gene_id never shifts or gets
+reused. Evaluation matrices synchronize by gene_id, so pruning cannot cause a
+cached result to be mistaken for a different GP gene that moves into the same
+gidx.
+
 ## Synthesis v2
 
 synth_v2(...) follows the same bidirectional search loop and return contract as

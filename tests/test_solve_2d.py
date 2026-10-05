@@ -9,7 +9,11 @@ from notebooks.ops.environment import (
     get_GP_pool,
     get_ST_unsovled_frontier,
 )
-from notebooks.ops.solve import solve_2dim_1gene_basic
+import notebooks.ops.solve as solve_module
+from notebooks.ops.solve import (
+    PairEvaluationMatrix,
+    solve_2dim_1gene_basic,
+)
 
 
 def _matrix_gp(genes):
@@ -410,3 +414,74 @@ def test_2d_solver_rejects_non_2d_pool_data():
             SP_X=SP_X,
             ST=ST,
         )
+
+
+def test_2d_evaluation_cache_skips_completed_pair(monkeypatch):
+    GP_meta, GP_X = _matrix_gp(
+        [
+            [
+                np.zeros((2, 2), dtype=bool),
+                np.zeros((2, 2), dtype=bool),
+            ]
+        ]
+    )
+    SP_meta, SP_X, ST = _matrix_sp(
+        [
+            [
+                np.array(
+                    [[True, False], [False, False]],
+                    dtype=bool,
+                ),
+                np.array(
+                    [[False, True], [False, False]],
+                    dtype=bool,
+                ),
+            ]
+        ]
+    )
+
+    evaluation_matrix = PairEvaluationMatrix(2)
+    calls = 0
+    original = solve_module._candidate_2d_rule_solutions
+
+    def counted(x_gene, y_gene):
+        nonlocal calls
+        calls += 1
+        return original(x_gene, y_gene)
+
+    monkeypatch.setattr(
+        solve_module,
+        "_candidate_2d_rule_solutions",
+        counted,
+    )
+
+    def run():
+        return solve_2dim_1gene_basic(
+            get_GP_pool(
+                GP_meta,
+                GP_X,
+                min_dim=2,
+                max_dim=2,
+            ),
+            get_ST_unsovled_frontier(
+                ST,
+                SP_X,
+                min_dim=2,
+                max_dim=2,
+            ),
+            GP_X=GP_X,
+            SP_X=SP_X,
+            ST=ST,
+            GP_meta=GP_meta,
+            SP_meta=SP_meta,
+            evaluation_matrix=evaluation_matrix,
+        )
+
+    assert run() == []
+    assert calls == 1
+    assert evaluation_matrix.matrix.shape == (1, 1)
+    assert evaluation_matrix.matrix[0, 0]
+
+    assert run() == []
+    assert calls == 1
+
