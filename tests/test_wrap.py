@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from notebooks.ops import synth, synth_v2
+from notebooks.ops import synth, synth_v2, synth_v3
 from notebooks.ops.environment import ProgramMeta, init_env
 import notebooks.ops.solve as solve_module
 import notebooks.ops.wrap as wrap_module
@@ -560,6 +560,109 @@ def test_synth_v2_zero_prune_size_skips_gp_prune(
     )
 
     assert calls == []
+
+
+def test_synth_v3_uses_fast_gp_generator_and_reports_phase_timing(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    task_id = "synth_v3_fast_task"
+
+    _write_task(
+        tmp_path,
+        task_id,
+        train=[
+            {
+                "input": [[1, 2], [3, 4]],
+                "output": [[4, 3], [2, 1]],
+            }
+        ],
+        test=[
+            {
+                "input": [[5, 6], [7, 8]],
+                "output": [[8, 7], [6, 5]],
+            }
+        ],
+    )
+
+    calls = []
+
+    monkeypatch.setattr(
+        wrap_module,
+        "_solve_frontier",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_fast(
+        GP_meta,
+        GP_X,
+        n_new_genes,
+        *,
+        rng=None,
+        source_probe_attempts=32,
+        **kwargs,
+    ):
+        calls.append(("fast", source_probe_attempts))
+        gidx = GP_X.append_gene(
+            [np.int64(99)] * GP_X.sample_count
+        )
+        GP_meta.append(
+            source=1,
+            op="test_v3_fast",
+            dims=0,
+        )
+        return [gidx]
+
+    monkeypatch.setattr(
+        wrap_module,
+        "GP_generate_fast",
+        fake_fast,
+    )
+    monkeypatch.setattr(
+        wrap_module,
+        "GP_prune",
+        lambda *args, **kwargs: [],
+    )
+
+    task = wrap_module._load_task_by_id(
+        task_id,
+        data_root=tmp_path,
+        split="training",
+    )
+    initial_gp = len(wrap_module.init_env(task.train)[1])
+
+    result = synth_v3(
+        task_id,
+        max_GP=initial_gp + 1,
+        max_SP=0,
+        gen_size_GP=1,
+        prune_size_GP=1,
+        source_probe_attempts=7,
+        data_root=tmp_path,
+        split="training",
+        rng=0,
+        verbosity=3,
+    )
+
+    assert result[-1] == 1
+    assert calls == [("fast", 7)]
+    output = capsys.readouterr().out
+    assert "GPgen=" in output
+    assert "SPgen=" in output
+    assert "solve=" in output
+    assert "prune=" in output
+
+
+def test_synth_v3_rejects_zero_source_probe_attempts():
+    with pytest.raises(
+        ValueError,
+        match="source_probe_attempts must be a positive integer",
+    ):
+        synth_v3(
+            "does-not-matter",
+            source_probe_attempts=0,
+        )
 
 
 def test_synth_v2_rejects_invalid_prune_size_before_task_loading():
