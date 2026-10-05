@@ -933,12 +933,6 @@ def _select_source_for_operation(
             )
             continue
 
-        task_state.mark_attempted(
-            GP_meta,
-            info,
-            source,
-            params,
-        )
         key = task_state.source_key(
             GP_meta,
             GP_X,
@@ -953,6 +947,12 @@ def _select_source_for_operation(
     if best is None:
         return None
 
+    task_state.mark_attempted(
+        GP_meta,
+        info,
+        best[1],
+        params,
+    )
     return best[1], best[2]
 
 
