@@ -11,8 +11,11 @@ from notebooks.ops.environment import (
     STSet,
     SolutionTree,
     get_GP_pool,
+    get_GP_pool_gidxs,
     get_ST_unsolved_frontier,
+    get_ST_unsolved_frontier_gidxs,
     get_ST_unsovled_frontier,
+    get_ST_unsovled_frontier_gidxs,
     init_env,
 )
 from notebooks.ops.inv_ops import (
@@ -820,6 +823,81 @@ def test_get_GP_pool_filters_dim_and_dtype_symmetrically():
         int_matrix_pool[0],
         GP_X[0],
     )
+
+
+def test_identity_pool_helpers_return_exact_live_gene_indices():
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
+
+    gp_gidxs = get_GP_pool_gidxs(
+        GP_meta,
+        GP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+    gp_pool = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+
+    assert len(gp_gidxs) == len(gp_pool)
+
+    for position, gidx in enumerate(gp_gidxs):
+        assert genes_exactly_equal(
+            gp_pool[position],
+            GP_X[gidx],
+        )
+
+    sp_gidxs = get_ST_unsovled_frontier_gidxs(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+    )
+    sp_frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+    )
+
+    assert sp_gidxs == get_ST_unsolved_frontier_gidxs(
+        ST,
+        SP_X,
+        min_dim=2,
+        max_dim=2,
+    )
+    assert len(sp_gidxs) == len(sp_frontier)
+
+    for position, gidx in enumerate(sp_gidxs):
+        assert genes_exactly_equal(
+            sp_frontier[position],
+            SP_X[gidx],
+        )
+
+
+def test_identity_pool_helpers_preserve_equal_valued_initial_genes():
+    meta = ProgramMeta(side="GP")
+    X = ProgramX(side="GP", sample_count=2)
+
+    for op_name in ("semantic_a", "semantic_b"):
+        gidx = X.append_gene(
+            [np.int64(4), np.int64(7)]
+        )
+        meta.append(
+            source=-1,
+            op=op_name,
+            dims=0,
+        )
+        assert gidx == len(meta) - 1
+
+    assert get_GP_pool_gidxs(
+        meta,
+        X,
+        min_dim=0,
+        max_dim=0,
+    ) == (0, 1)
 
 
 def test_get_GP_pool_updates_as_GP_grows():

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -444,6 +444,33 @@ def _candidate_rule_solutions(
     return matches
 
 
+def _normalize_supplied_gidxs(
+    name: str,
+    gidxs: Iterable[int] | None,
+    *,
+    expected_count: int,
+    X: ProgramX,
+) -> tuple[int, ...] | None:
+    """Validate optional direct gene identities without comparing gene data."""
+    if gidxs is None:
+        return None
+
+    values = tuple(int(value) for value in gidxs)
+
+    if len(values) != expected_count:
+        raise ValueError(
+            f"{name} must contain exactly {expected_count} indices."
+        )
+    if len(set(values)) != len(values):
+        raise ValueError(f"{name} must contain unique gene indices.")
+    if any(gidx < 0 or gidx >= len(X) for gidx in values):
+        raise IndexError(
+            f"{name} contains an index outside [0, {len(X) - 1}]."
+        )
+
+    return values
+
+
 def _map_pool_to_gp_gidx(
     GP_pool: np.ndarray,
     GP_X: ProgramX,
@@ -534,6 +561,8 @@ def solve_0dim_1gene_basic(
     GP_meta: ProgramMeta | None = None,
     SP_meta: ProgramMeta | None = None,
     evaluation_matrix: PairEvaluationMatrix | None = None,
+    GP_gidxs: Iterable[int] | None = None,
+    SP_gidxs: Iterable[int] | None = None,
 ) -> list[Scalar1GeneSolution]:
     """Solve unresolved scalar ST targets from one scalar GP gene.
 
@@ -565,6 +594,10 @@ def solve_0dim_1gene_basic(
         gp_gidx
         solution_rule
         solution_params
+
+    GP_gidxs / SP_gidxs may be supplied by identity-aware callers to bypass
+    equality-based recovery from pool data. When omitted, the legacy mapping
+    path remains available for direct/backward-compatible solver calls.
     """
     if GP_X.side != "GP":
         raise ValueError(
@@ -585,22 +618,39 @@ def solve_0dim_1gene_basic(
     for gene in ST_frontier:
         _scalar_dtype(gene)
 
-    gp_entries = list(
-        zip(
-            _map_pool_to_gp_gidx(GP_pool, GP_X),
-            GP_pool,
-        )
+    direct_gp_gidxs = _normalize_supplied_gidxs(
+        "GP_gidxs",
+        GP_gidxs,
+        expected_count=len(GP_pool),
+        X=GP_X,
     )
+    direct_sp_gidxs = _normalize_supplied_gidxs(
+        "SP_gidxs",
+        SP_gidxs,
+        expected_count=len(ST_frontier),
+        X=SP_X,
+    )
+
+    mapped_gp_gidxs = (
+        _map_pool_to_gp_gidx(GP_pool, GP_X)
+        if direct_gp_gidxs is None
+        else list(direct_gp_gidxs)
+    )
+    target_sp_gidx = (
+        _map_frontier_to_sp_gidx(
+            ST_frontier,
+            SP_X,
+            ST,
+        )
+        if direct_sp_gidxs is None
+        else list(direct_sp_gidxs)
+    )
+
+    gp_entries = list(zip(mapped_gp_gidxs, GP_pool))
 
     # Stable low-gidx ordering provides a deterministic tie-breaker and
     # naturally prefers earlier/shallower GP genes when rule complexity ties.
     gp_entries.sort(key=lambda item: item[0])
-
-    target_sp_gidx = _map_frontier_to_sp_gidx(
-        ST_frontier,
-        SP_X,
-        ST,
-    )
 
     if evaluation_matrix is not None:
         if evaluation_matrix.dims != 0:
@@ -1410,6 +1460,8 @@ def solve_2dim_1gene_basic(
     GP_meta: ProgramMeta | None = None,
     SP_meta: ProgramMeta | None = None,
     evaluation_matrix: PairEvaluationMatrix | None = None,
+    GP_gidxs: Iterable[int] | None = None,
+    SP_gidxs: Iterable[int] | None = None,
 ) -> list[Matrix1GeneSolution]:
     """Solve unresolved 2D ST targets from one 2D GP gene.
 
@@ -1435,6 +1487,10 @@ def solve_2dim_1gene_basic(
 
     Successful solutions are immediately written into ST with gp_gidx,
     solution_rule, and solution_params.
+
+    GP_gidxs / SP_gidxs may be supplied by identity-aware callers to bypass
+    equality-based recovery from pool data. When omitted, the legacy mapping
+    path remains available for direct/backward-compatible solver calls.
     """
     if GP_X.side != "GP":
         raise ValueError(
@@ -1465,19 +1521,36 @@ def solve_2dim_1gene_basic(
     for gene in ST_frontier:
         _matrix_dtype(gene)
 
-    gp_entries = list(
-        zip(
-            _map_pool_to_gp_gidx(GP_pool, GP_X),
-            GP_pool,
-        )
+    direct_gp_gidxs = _normalize_supplied_gidxs(
+        "GP_gidxs",
+        GP_gidxs,
+        expected_count=len(GP_pool),
+        X=GP_X,
     )
-    gp_entries.sort(key=lambda item: item[0])
+    direct_sp_gidxs = _normalize_supplied_gidxs(
+        "SP_gidxs",
+        SP_gidxs,
+        expected_count=len(ST_frontier),
+        X=SP_X,
+    )
 
-    target_sp_gidx = _map_2d_frontier_to_sp_gidx(
-        ST_frontier,
-        SP_X,
-        ST,
+    mapped_gp_gidxs = (
+        _map_pool_to_gp_gidx(GP_pool, GP_X)
+        if direct_gp_gidxs is None
+        else list(direct_gp_gidxs)
     )
+    target_sp_gidx = (
+        _map_2d_frontier_to_sp_gidx(
+            ST_frontier,
+            SP_X,
+            ST,
+        )
+        if direct_sp_gidxs is None
+        else list(direct_sp_gidxs)
+    )
+
+    gp_entries = list(zip(mapped_gp_gidxs, GP_pool))
+    gp_entries.sort(key=lambda item: item[0])
 
     if evaluation_matrix is not None:
         if evaluation_matrix.dims != 2:

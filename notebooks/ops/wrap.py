@@ -14,8 +14,8 @@ from .environment import (
     STNodeRef,
     STSet,
     SolutionTree,
-    get_GP_pool,
-    get_ST_unsovled_frontier,
+    get_GP_pool_gidxs,
+    get_ST_unsovled_frontier_gidxs,
     init_env,
 )
 from .kelschinator import Kelschinator
@@ -155,6 +155,19 @@ def _operation_application_count(meta: ProgramMeta) -> int:
     return len(signatures)
 
 
+def _genes_at_gidxs(
+    X: ProgramX,
+    gidxs: tuple[int, ...],
+) -> np.ndarray:
+    """Build a read-only-style solver view without copying gene contents."""
+    result = np.empty(len(gidxs), dtype=object)
+
+    for index, gidx in enumerate(gidxs):
+        result[index] = X[gidx]
+
+    return result
+
+
 def _solve_frontier(
     GP_meta: ProgramMeta,
     GP_X: ProgramX,
@@ -163,18 +176,18 @@ def _solve_frontier(
     ST: SolutionTree,
     evaluation_cache: SolveEvaluationCache,
 ) -> None:
-    """Run exact one-gene matchers without repeating completed pair checks."""
+    """Run exact matchers with direct gene identities and cached pair checks."""
 
     if ST.solved:
         return
 
-    gp_0d = get_GP_pool(
+    gp_0d_gidxs = get_GP_pool_gidxs(
         GP_meta,
         GP_X,
         min_dim=0,
         max_dim=0,
     )
-    sp_0d = get_ST_unsovled_frontier(
+    sp_0d_gidxs = get_ST_unsovled_frontier_gidxs(
         ST,
         SP_X,
         min_dim=0,
@@ -182,26 +195,28 @@ def _solve_frontier(
     )
 
     solve_0dim_1gene_basic(
-        gp_0d,
-        sp_0d,
+        _genes_at_gidxs(GP_X, gp_0d_gidxs),
+        _genes_at_gidxs(SP_X, sp_0d_gidxs),
         GP_X=GP_X,
         SP_X=SP_X,
         ST=ST,
         GP_meta=GP_meta,
         SP_meta=SP_meta,
         evaluation_matrix=evaluation_cache.dim0,
+        GP_gidxs=gp_0d_gidxs,
+        SP_gidxs=sp_0d_gidxs,
     )
 
     if ST.solved:
         return
 
-    gp_2d = get_GP_pool(
+    gp_2d_gidxs = get_GP_pool_gidxs(
         GP_meta,
         GP_X,
         min_dim=2,
         max_dim=2,
     )
-    sp_2d = get_ST_unsovled_frontier(
+    sp_2d_gidxs = get_ST_unsovled_frontier_gidxs(
         ST,
         SP_X,
         min_dim=2,
@@ -209,14 +224,16 @@ def _solve_frontier(
     )
 
     solve_2dim_1gene_basic(
-        gp_2d,
-        sp_2d,
+        _genes_at_gidxs(GP_X, gp_2d_gidxs),
+        _genes_at_gidxs(SP_X, sp_2d_gidxs),
         GP_X=GP_X,
         SP_X=SP_X,
         ST=ST,
         GP_meta=GP_meta,
         SP_meta=SP_meta,
         evaluation_matrix=evaluation_cache.dim2,
+        GP_gidxs=gp_2d_gidxs,
+        SP_gidxs=sp_2d_gidxs,
     )
 
 

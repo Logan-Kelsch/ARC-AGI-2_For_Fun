@@ -667,3 +667,59 @@ def test_0d_cache_preserves_distinct_ids_for_equal_valued_sp_frontier_genes():
         SP_meta.stable_id(1),
     )
 
+
+def test_0d_solver_direct_ids_bypass_equality_identity_recovery(monkeypatch):
+    GP_meta, GP_X = _scalar_gp(
+        [
+            [np.int64(2), np.int64(3), np.int64(4)],
+            [np.int64(2), np.int64(3), np.int64(4)],
+        ]
+    )
+    SP_meta, SP_X, ST = _scalar_sp(
+        [
+            [np.int64(100), np.int64(101), np.int64(105)],
+        ]
+    )
+    GP_pool = get_GP_pool(
+        GP_meta,
+        GP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+    ST_frontier = get_ST_unsovled_frontier(
+        ST,
+        SP_X,
+        min_dim=0,
+        max_dim=0,
+    )
+
+    monkeypatch.setattr(
+        solve_module,
+        "_map_pool_to_gp_gidx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy GP equality mapping was called")
+        ),
+    )
+    monkeypatch.setattr(
+        solve_module,
+        "_map_frontier_to_sp_gidx",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy SP equality mapping was called")
+        ),
+    )
+
+    solved = solve_0dim_1gene_basic(
+        GP_pool,
+        ST_frontier,
+        GP_X=GP_X,
+        SP_X=SP_X,
+        ST=ST,
+        GP_meta=GP_meta,
+        SP_meta=SP_meta,
+        evaluation_matrix=PairEvaluationMatrix(0),
+        GP_gidxs=(0, 1),
+        SP_gidxs=(0,),
+    )
+
+    assert solved == []
+

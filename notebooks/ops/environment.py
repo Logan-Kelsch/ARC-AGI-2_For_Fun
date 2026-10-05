@@ -1178,53 +1178,18 @@ def _pack_selected_genes(
     return result
 
 
-def get_ST_unsovled_frontier(
+def get_ST_unsovled_frontier_gidxs(
     ST: SolutionTree,
     SP_X: ProgramX,
     *,
     min_dim: int | None = None,
     max_dim: int | None = None,
     dtype: Any | None = None,
-) -> np.ndarray:
-    """Return instantiated SP data for unresolved Boolean-ST frontier nodes.
-
-    The result is a 1D object ndarray with one entry per unresolved concrete ST
-    node reachable from the root. Each entry is that SP gene's complete
-    instantiated data across samples, i.e. the same 1D object array stored at:
-
-        SP_X[sp_gidx]
-
-    Filters:
-      min_dim / max_dim:
-        Inclusive dimensionality bounds.
-
-      dtype:
-        Exact atomic NumPy dtype required across the complete gene. Examples:
-
-            dtype=bool
-            dtype=np.bool_
-            dtype=np.int64
-            dtype="float64"
-
-        dtype=None applies no dtype restriction.
-
-    Examples:
-
-        min_dim=0, max_dim=0
-            scalar frontier genes of any dtype
-
-        min_dim=2, max_dim=2, dtype=bool
-            only 2D boolean frontier genes
-
-        dtype=np.int64
-            int64 frontier genes of any dimensionality
-
-    Logical helper nodes such as "shape" and "composite" have no SP gene and
-    are therefore never returned.
-    """
+) -> tuple[int, ...]:
+    """Return live SP gene indices on the filtered unresolved ST frontier."""
     if SP_X.side != "SP":
         raise ValueError(
-            "get_ST_unsovled_frontier requires SP_X.side == 'SP'."
+            "get_ST_unsovled_frontier_gidxs requires SP_X.side == 'SP'."
         )
 
     min_dim, max_dim, dtype = _validate_pool_filters(
@@ -1233,7 +1198,7 @@ def get_ST_unsovled_frontier(
         dtype=dtype,
     )
 
-    selected: list[np.ndarray] = []
+    selected: list[int] = []
 
     for node_id in ST.unresolved_frontier_nodes():
         node = ST[node_id]
@@ -1261,71 +1226,63 @@ def get_ST_unsovled_frontier(
         if not _gene_matches_dtype(gene, dtype):
             continue
 
-        selected.append(gene)
+        selected.append(int(node.sp_gidx))
 
-    return _pack_selected_genes(selected)
+    return tuple(selected)
 
 
-# Correctly spelled alias for convenience; the requested public name above is
-# retained exactly.
+get_ST_unsolved_frontier_gidxs = get_ST_unsovled_frontier_gidxs
+
+
+def get_ST_unsovled_frontier(
+    ST: SolutionTree,
+    SP_X: ProgramX,
+    *,
+    min_dim: int | None = None,
+    max_dim: int | None = None,
+    dtype: Any | None = None,
+) -> np.ndarray:
+    """Return instantiated SP data for unresolved Boolean-ST frontier nodes.
+
+    The result remains data-only for backward compatibility. Search code that
+    needs identity should use get_ST_unsovled_frontier_gidxs() and index SP_X
+    directly rather than recovering identity by comparing gene contents.
+    """
+    gidxs = get_ST_unsovled_frontier_gidxs(
+        ST,
+        SP_X,
+        min_dim=min_dim,
+        max_dim=max_dim,
+        dtype=dtype,
+    )
+
+    return _pack_selected_genes(
+        SP_X[gidx]
+        for gidx in gidxs
+    )
+
+
+# Correctly spelled aliases for convenience; the requested public names above
+# are retained exactly.
 get_ST_unsolved_frontier = get_ST_unsovled_frontier
 
 
-def get_GP_pool(
+def get_GP_pool_gidxs(
     GP_meta: ProgramMeta,
     GP_X: ProgramX,
     *,
     min_dim: int | None = None,
     max_dim: int | None = None,
     dtype: Any | None = None,
-) -> np.ndarray:
-    """Return instantiated GP genes matching dimensionality/dtype filters.
-
-    The return value is a 1D object ndarray. Each entry is one complete GP gene
-    across all training samples, equivalent to:
-
-        GP_X[gidx]
-
-    Filters are identical to get_ST_unsovled_frontier:
-
-        min_dim / max_dim
-            Inclusive dimensionality bounds.
-
-        dtype
-            Exact atomic NumPy dtype across the complete gene.
-
-    Examples:
-
-        get_GP_pool(
-            GP_meta,
-            GP_X,
-            min_dim=0,
-            max_dim=0,
-        )
-            -> all scalar GP genes, any dtype
-
-        get_GP_pool(
-            GP_meta,
-            GP_X,
-            min_dim=2,
-            max_dim=2,
-            dtype=bool,
-        )
-            -> only 2D boolean GP genes
-
-        get_GP_pool(
-            GP_meta,
-            GP_X,
-        )
-            -> the complete GP pool
-    """
+) -> tuple[int, ...]:
+    """Return live GP indices matching the requested pool filters."""
     if GP_meta.side != "GP":
         raise ValueError(
-            "get_GP_pool requires GP_meta.side == 'GP'."
+            "get_GP_pool_gidxs requires GP_meta.side == 'GP'."
         )
     if GP_X.side != "GP":
         raise ValueError(
-            "get_GP_pool requires GP_X.side == 'GP'."
+            "get_GP_pool_gidxs requires GP_X.side == 'GP'."
         )
     if len(GP_meta) != len(GP_X):
         raise ValueError(
@@ -1338,7 +1295,7 @@ def get_GP_pool(
         dtype=dtype,
     )
 
-    selected: list[np.ndarray] = []
+    selected: list[int] = []
 
     for gidx in range(len(GP_X)):
         dims = GP_meta.dims[gidx]
@@ -1353,9 +1310,36 @@ def get_GP_pool(
         if not _gene_matches_dtype(gene, dtype):
             continue
 
-        selected.append(gene)
+        selected.append(gidx)
 
-    return _pack_selected_genes(selected)
+    return tuple(selected)
+
+
+def get_GP_pool(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    *,
+    min_dim: int | None = None,
+    max_dim: int | None = None,
+    dtype: Any | None = None,
+) -> np.ndarray:
+    """Return instantiated GP genes matching dimensionality/dtype filters.
+
+    This data-only API is retained for backward compatibility. Search code that
+    needs identity should use get_GP_pool_gidxs() and index GP_X directly.
+    """
+    gidxs = get_GP_pool_gidxs(
+        GP_meta,
+        GP_X,
+        min_dim=min_dim,
+        max_dim=max_dim,
+        dtype=dtype,
+    )
+
+    return _pack_selected_genes(
+        GP_X[gidx]
+        for gidx in gidxs
+    )
 
 
 

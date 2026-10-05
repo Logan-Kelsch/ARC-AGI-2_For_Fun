@@ -860,6 +860,18 @@ Initialization may also contain distinct genes with identical instantiated
 values. Solver pool/frontier mapping preserves those genes as separate
 identities instead of collapsing equal data onto the first matching gidx.
 
+## Direct identity frontier solving
+
+The synthesis hot path no longer reconstructs GP/SP identity from copied gene
+data. `synth` and `synth_v2` filter directly to live `gidx` values, pass
+those identities into the 0D/2D solvers, and use the corresponding ProgramX
+genes as lightweight read-only solver views.
+
+This removes the previous equality-search remapping step that could scan the
+entire GP pool for every selected GP gene (quadratic pool remapping as GP
+grew). The original data-only pool/frontier helpers remain available for
+notebooks and backward-compatible direct solver use.
+
 ## Frontier evaluation cache
 
 The active synthesis wrappers keep two Boolean pair-evaluation matrices:
