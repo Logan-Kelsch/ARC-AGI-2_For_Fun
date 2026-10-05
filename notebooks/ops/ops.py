@@ -2309,7 +2309,7 @@ def _sample_uniform_legal_candidate_stochastic(
 
     source_probe_attempts = int(source_probe_attempts)
     legal_operations: list[
-        tuple[OperationInfo, dict[str, Any], Any]
+        tuple[OperationInfo, Any, dict[str, Any]]
     ] = []
 
     for info in _eligible_operation_infos(
@@ -2330,7 +2330,7 @@ def _sample_uniform_legal_candidate_stochastic(
 
         if source_idx is not None:
             legal_operations.append(
-                (info, params, source_idx)
+                (info, source_idx, params)
             )
 
     if not legal_operations:
