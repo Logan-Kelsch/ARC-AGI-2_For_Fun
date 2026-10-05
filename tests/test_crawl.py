@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import json
 import math
 
@@ -86,9 +87,8 @@ def test_gamma_backpropagates_solver_credit_through_gp_decisions():
         seed_gene_ids=(0,),
         gene_depth={0: 0, 10: 1, 11: 2},
         phenotype_cache={},
-        coverage_queue=None,
+        coverage_queue=deque(),
     )
-    state.coverage_queue = __import__("collections").deque()
     state.gene_to_decision = {
         10: parent_decision,
         11: child_decision,
