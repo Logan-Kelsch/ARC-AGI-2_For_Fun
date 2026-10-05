@@ -1,4 +1,4 @@
-from .wrap import synth, synth_v2
+from .wrap import synth, synth_v2, synth_v3
 from .kelschinator import (
     Kelschinator,
     KelschinatorCompileError,
@@ -45,6 +45,7 @@ from .inv_ops import (
 )
 from .ops import (
     GP_generate,
+    GP_generate_fast,
     GP_prune,
     OP_REGISTRY,
     SP_generate,
@@ -119,6 +120,7 @@ from .loss import (
 __all__ = [
     "synth",
     "synth_v2",
+    "synth_v3",
     "Kelschinator",
     "KelschinatorCompileError",
     "ProgramMeta",
@@ -169,6 +171,7 @@ __all__ = [
     "equivalent_gene_idx",
     "sample_operation_params",
     "GP_generate",
+    "GP_generate_fast",
     "GP_prune",
     "SP_generate",
     "bool_mat_ident",
