@@ -1126,7 +1126,7 @@ def _plot_depth_distribution(
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     axes[0].boxplot(
         exploitation,
-        tick_labels=[str(depth) for depth in depths],
+        labels=[str(depth) for depth in depths],
         showfliers=False,
     )
     axes[0].set_title("Exploitation by source depth")
