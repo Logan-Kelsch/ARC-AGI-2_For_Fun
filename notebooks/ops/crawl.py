@@ -356,6 +356,8 @@ class _TaskUCTState:
         run_id: int,
         GP_meta: ProgramMeta,
         GP_X: ProgramX,
+        policy: GrammarUCTPolicy,
+        rng: np.random.Generator,
     ) -> "_TaskUCTState":
         seed_gene_ids = tuple(
             GP_meta.stable_id(gidx)
@@ -372,13 +374,24 @@ class _TaskUCTState:
             phenotype_cache={},
             coverage_queue=deque(),
         )
-        state.coverage_queue = deque(
-            _build_depth0_coverage(
-                GP_meta,
-                GP_X,
-                seed_gene_ids,
-            )
+        coverage = _build_depth0_coverage(
+            GP_meta,
+            GP_X,
+            seed_gene_ids,
         )
+        coverage_probability = min(
+            1.0,
+            policy.exploration_coefficient(),
+        )
+
+        if coverage_probability < 1.0:
+            coverage = [
+                candidate
+                for candidate in coverage
+                if float(rng.random()) < coverage_probability
+            ]
+
+        state.coverage_queue = deque(coverage)
         return state
 
     def stable_to_gidx(self, GP_meta: ProgramMeta) -> dict[int, int]:
@@ -1228,6 +1241,8 @@ def _run_crawl_task(
         run_id,
         GP_meta,
         GP_X,
+        policy,
+        rng,
     )
     evaluation_cache = SolveEvaluationCache()
     generated_this_task = 0
@@ -1467,9 +1482,11 @@ def crawl_synth_v1(
       2. then sample with replacement from the currently unsolved training set;
       3. remove a task from that sampling set only after exact test success.
 
-    Every task begins with deterministic depth-0 coverage over the fixed
-    initialization GP pool, ordered by low source index. After that, GP
-    generation uses operation-first UCT followed by source-phenotype UCT.
+    Every task may begin with low-index depth-0 coverage over the fixed
+    initialization GP pool. Coverage probability is min(1, C), where C is the
+    decaying global exploration coefficient: it is exhaustive at the start and
+    falls to about 5% when C reaches 0.05. After that, GP generation uses
+    operation-first UCT followed by source-phenotype UCT.
 
     Exploitation is sqrt(solve_credit / visits). A newly successful GP solver
     sends reward backward through generated GP lineage with discount gamma.
