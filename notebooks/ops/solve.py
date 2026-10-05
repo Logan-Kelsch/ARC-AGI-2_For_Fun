@@ -444,23 +444,36 @@ def _candidate_rule_solutions(
     return matches
 
 
-def _find_gp_gidx(
-    pool_gene: np.ndarray,
+def _map_pool_to_gp_gidx(
+    GP_pool: np.ndarray,
     GP_X: ProgramX,
-) -> int:
-    matches = [
-        gidx
-        for gidx in range(len(GP_X))
-        if genes_exactly_equal(pool_gene, GP_X[gidx])
-    ]
+) -> list[int]:
+    """Map pool rows back to distinct live GP indices occurrence-by-occurrence.
 
-    if not matches:
-        raise ValueError(
-            "A GP_pool gene was not found in GP_X."
-        )
+    GP_pool stores data only, so equal-valued genes must not collapse onto the
+    first matching gidx.  Consume each matching live GP index at most once,
+    preserving the pool's order.  This keeps semantically distinct genes such
+    as equal height/width initializations distinct for stable-ID caching.
+    """
+    unused = list(range(len(GP_X)))
+    mapped: list[int] = []
 
-    # Earlier GP genes are preferred when exact duplicates somehow exist.
-    return min(matches)
+    for pool_gene in GP_pool:
+        match_pos = None
+
+        for position, gidx in enumerate(unused):
+            if genes_exactly_equal(pool_gene, GP_X[gidx]):
+                match_pos = position
+                break
+
+        if match_pos is None:
+            raise ValueError(
+                "A GP_pool gene could not be mapped to a distinct live GP gene."
+            )
+
+        mapped.append(unused.pop(match_pos))
+
+    return mapped
 
 
 def _map_frontier_to_sp_gidx(
@@ -572,13 +585,12 @@ def solve_0dim_1gene_basic(
     for gene in ST_frontier:
         _scalar_dtype(gene)
 
-    gp_entries = [
-        (
-            _find_gp_gidx(gene, GP_X),
-            gene,
+    gp_entries = list(
+        zip(
+            _map_pool_to_gp_gidx(GP_pool, GP_X),
+            GP_pool,
         )
-        for gene in GP_pool
-    ]
+    )
 
     # Stable low-gidx ordering provides a deterministic tie-breaker and
     # naturally prefers earlier/shallower GP genes when rule complexity ties.
@@ -1453,13 +1465,12 @@ def solve_2dim_1gene_basic(
     for gene in ST_frontier:
         _matrix_dtype(gene)
 
-    gp_entries = [
-        (
-            _find_gp_gidx(gene, GP_X),
-            gene,
+    gp_entries = list(
+        zip(
+            _map_pool_to_gp_gidx(GP_pool, GP_X),
+            GP_pool,
         )
-        for gene in GP_pool
-    ]
+    )
     gp_entries.sort(key=lambda item: item[0])
 
     target_sp_gidx = _map_2d_frontier_to_sp_gidx(
