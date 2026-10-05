@@ -1753,6 +1753,57 @@ def test_gp_generate_never_retains_equivalent_gene_data():
             assert not genes_exactly_equal(GP_X[i], GP_X[j])
 
 
+def test_gp_generate_target_allows_atomic_multioutput_overshoot():
+    @operation(
+        partition="null",
+        output_count=3,
+        min_dims_exclusive=-1,
+    )
+    def test_three_outputs(meta, X, source_idx):
+        generated = []
+
+        for delta in (10, 20, 30):
+            values = [
+                np.asarray(value) + delta
+                for value in X[source_idx]
+            ]
+            gidx = X.append_gene(values)
+            meta.append(
+                source=source_idx,
+                op="test_three_outputs",
+                dims=meta.dims[source_idx],
+            )
+            generated.append(gidx)
+
+        return tuple(generated)
+
+    meta, X = _raw_program(
+        "GP",
+        [
+            np.int64(1),
+            np.int64(2),
+        ],
+        raw_op="raw_input",
+    )
+
+    created = GP_generate(
+        meta,
+        X,
+        1,
+        rng=0,
+        operation_names=("test_three_outputs",),
+    )
+
+    assert len(created) == 3
+    assert len(meta) == len(X) == 4
+    assert [
+        int(np.asarray(X[gidx, 0]).item())
+        for gidx in created
+    ] == [11, 21, 31]
+
+    OP_REGISTRY.pop("test_three_outputs", None)
+
+
 def test_gp_generate_zero_is_noop():
     GP_meta, GP_X, SP_meta, SP_X, ST = init_env(_train_pairs())
 
