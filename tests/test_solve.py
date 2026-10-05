@@ -617,28 +617,10 @@ def test_0d_cache_preserves_distinct_ids_for_equal_valued_sp_frontier_genes():
         ]
     )
 
-    from notebooks.ops.environment import STNodeRef, STSet
+    from notebooks.ops.environment import STNode, STNodeRef, STSet
 
-    ST[0].derivation = STSet(
-        mode="OR",
-        members=[
-            STSet(
-                mode="AND",
-                members=[
-                    STNodeRef(0),
-                    STNodeRef(1),
-                ],
-                partition="and",
-            )
-        ],
-    )
-
-    # Avoid the self-reference cycle above by making a logical root that owns
-    # both equal-valued concrete requirements.
-    ST.nodes["equal_targets"] = ST.nodes.pop(0)
-    ST.nodes["equal_targets"].node_id = "equal_targets"
     ST.roots = ("root_equal_targets",)
-    ST.nodes["root_equal_targets"] = type(ST.nodes[1])(
+    ST.nodes["root_equal_targets"] = STNode(
         node_id="root_equal_targets",
         label="root equal targets",
         sp_gidx=None,
@@ -647,13 +629,12 @@ def test_0d_cache_preserves_distinct_ids_for_equal_valued_sp_frontier_genes():
         derivation=STSet(
             mode="AND",
             members=[
-                STNodeRef("equal_targets"),
+                STNodeRef(0),
                 STNodeRef(1),
             ],
             partition="and",
         ),
     )
-    ST.nodes["equal_targets"].derivation = None
 
     evaluation_matrix = PairEvaluationMatrix(0)
     frontier = get_ST_unsovled_frontier(
