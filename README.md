@@ -1075,3 +1075,106 @@ A shorter description is:
 The central research principle is:
 
 > **Grow candidate interpretations from the input, grow reconstructive requirements from the output, meet them through the simplest exact semantic relationships available, and compile the satisfied proof into an executable program.**
+## Grammar-UCT training crawl
+
+`crawl_synth_v1` is the first persistent cross-task grammar learner. It keeps
+task-local GP/SP/ST state transient while carrying UCT statistics across ARC
+training tasks.
+
+The crawl starts each task with deterministic depth-0 coverage over the fixed
+initial GP pool. Legal operation/source combinations are considered from low
+source index upward before learned selection takes over. Generated genes are
+depth 1+, and later selection is operation-first:
+
+```text
+depth-0 coverage
+      |
+      v
+operation UCT
+      |
+      v
+source phenotype UCT
+(depth / dims / dtype / shape)
+      |
+      v
+concrete source gene(s)
+      |
+      v
+generation -> ST solve -> discounted lineage credit
+```
+
+For a grammar node with `visits=N` and accumulated discounted solve credit `S`,
+exploitation is:
+
+```text
+sqrt(min(1, S / N))
+```
+
+A direct GP gene that newly solves an ST requirement receives credit `1.0`.
+That score is propagated to the generated GP decisions in its ancestry with
+`gamma ** distance`; the default gamma is `0.85`.
+
+The exploration coefficient decays exponentially with total accepted GP genes.
+Defaults are deliberately exploration-heavy:
+
+```text
+generation 0:         C = 8.0
+generation 1,000,000: C = 0.05
+```
+
+The source-UCT key is transferable across tasks and currently includes:
+
+- operation
+- maximum source depth
+- source dimensions
+- source atomic dtype signatures
+- coarse shape classes (`square/rect`, `fixed/variable`, `small/medium/large`)
+
+A small positive `depth_focus` term makes post-coverage search somewhat
+depth-first while still allowing learned solve rates to determine the long-run
+depth preference.
+
+Notebook usage:
+
+```python
+from notebooks.ops import crawl_synth_v1
+
+crawl = crawl_synth_v1(
+    first_tasks=["TASK_ID_A", "TASK_ID_B"],
+    max_GP=1000,
+    max_SP=100,
+    prune_size_GP=5,
+    max_total_generations=1_000_000,
+    gamma=0.85,
+    verbosity=3,
+    state_path="crawl_uct_state.json",
+)
+```
+
+`first_tasks` are attempted in the supplied order. After that, each task is
+drawn randomly with replacement from the currently unsolved training set.
+Exactly solved tasks are removed from that set.
+
+`verbosity=2` prints per-task search progress. `verbosity=3` additionally plots
+the current exploitation and exploration distributions by source depth.
+Successful tasks plot each test input, predicted output, and known expected
+output. Plotting is lazy/optional; the core package still only requires NumPy.
+
+The policy state can be resumed through `state_path`. It stores learned grammar
+statistics, solved task IDs, task-attempt count, and the global GP-generation
+counter, but not transient GP/SP graphs from an interrupted task.
+
+A CLI entry point is also available:
+
+```bash
+python notebooks/crawl_synth_v1.py \
+  --first-task TASK_ID_A \
+  --first-task TASK_ID_B \
+  --max-gp 1000 \
+  --max-sp 100 \
+  --prune-size 5 \
+  --max-total-generations 1000000 \
+  --state-path crawl_uct_state.json \
+  --verbosity 3
+```
+
