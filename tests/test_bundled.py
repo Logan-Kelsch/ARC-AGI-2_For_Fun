@@ -9,6 +9,7 @@ from notebooks.ops.bundled import (
     GeneComponentRef,
     GP_generate_bundled,
     apply_bundled_inverse,
+    apply_bundled_inverse_gene,
     apply_bundled_operation,
     component_gene,
     component_ref,
@@ -133,6 +134,92 @@ def test_composite_partition_is_one_gene_of_color_mask_rows():
     assert np.array_equal(
         reconstructed,
         grids[0],
+    )
+
+
+def test_manifest_aware_inverse_reconstructs_composite_application():
+    grids = [
+        np.array(
+            [
+                [0, 2],
+                [2, 0],
+            ],
+            dtype=np.int64,
+        ),
+        np.array(
+            [
+                [2, 2],
+                [0, 0],
+            ],
+            dtype=np.int64,
+        ),
+    ]
+    meta, X = _program("GP", grids)
+
+    gidx = apply_bundled_operation(
+        meta,
+        X,
+        "partition_composite",
+        0,
+    )
+
+    reconstructed = apply_bundled_inverse_gene(
+        meta,
+        X,
+        gidx,
+        0,
+    )
+
+    assert np.array_equal(reconstructed, grids[0])
+
+
+def test_manifest_aware_inverse_preserves_multiple_component_applications():
+    grids = [
+        np.array(
+            [
+                [0, 1],
+                [1, 0],
+            ],
+            dtype=np.int64,
+        ),
+        np.array(
+            [
+                [1, 1],
+                [0, 0],
+            ],
+            dtype=np.int64,
+        ),
+    ]
+    meta, X = _program("GP", grids)
+
+    composite_gidx = apply_bundled_operation(
+        meta,
+        X,
+        "partition_composite",
+        0,
+    )
+    complement_gidx = apply_bundled_operation(
+        meta,
+        X,
+        "bool_complement",
+        composite_gidx,
+    )
+
+    reconstructed = apply_bundled_inverse_gene(
+        meta,
+        X,
+        complement_gidx,
+        0,
+    )
+
+    assert reconstructed.shape == (2, 1)
+    assert np.array_equal(
+        reconstructed[0, 0],
+        grids[0] == 0,
+    )
+    assert np.array_equal(
+        reconstructed[1, 0],
+        grids[0] == 1,
     )
 
 
