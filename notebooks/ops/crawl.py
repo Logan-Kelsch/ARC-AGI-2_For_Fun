@@ -84,7 +84,8 @@ class GrammarUCTPolicy:
     exploration_start: float = 8.0
     exploration_end: float = 0.05
     exploration_horizon: int = 1_000_000
-    depth_focus: float = 0.08
+    depth_exploration_power: float = 1.0
+    depth_focus: float = 0.0
     total_gene_generations: int = 0
     total_decisions: int = 0
     task_attempts: int = 0
@@ -101,6 +102,8 @@ class GrammarUCTPolicy:
             raise ValueError("exploration_end must be >= 0.")
         if int(self.exploration_horizon) < 1:
             raise ValueError("exploration_horizon must be >= 1.")
+        if float(self.depth_exploration_power) <= 0.0:
+            raise ValueError("depth_exploration_power must be > 0.")
         if float(self.depth_focus) < 0.0:
             raise ValueError("depth_focus must be >= 0.")
 
@@ -108,6 +111,9 @@ class GrammarUCTPolicy:
         self.exploration_start = float(self.exploration_start)
         self.exploration_end = float(self.exploration_end)
         self.exploration_horizon = int(self.exploration_horizon)
+        self.depth_exploration_power = float(
+            self.depth_exploration_power
+        )
         self.depth_focus = float(self.depth_focus)
         self.total_gene_generations = int(self.total_gene_generations)
         self.total_decisions = int(self.total_decisions)
@@ -137,6 +143,30 @@ class GrammarUCTPolicy:
         ratio = self.exploration_end / self.exploration_start
         return self.exploration_start * (ratio ** fraction)
 
+    def depth_exploration_multiplier(
+        self,
+        source_depth: int,
+    ) -> float:
+        """Log-scale exploration downward with source depth.
+
+        Depth 0 receives the full exploration term. Deeper levels use:
+
+            D(d) = (1 / log2(d + 2)) ** depth_exploration_power
+
+        With the default power=1:
+            d=0 -> 1.000
+            d=1 -> 0.631
+            d=2 -> 0.500
+            d=6 -> 0.333
+
+        Visit decay remains independent, so sufficiently explored shallow
+        nodes naturally yield to less-visited deeper nodes.
+        """
+        source_depth = max(0, int(source_depth))
+        return (
+            1.0 / math.log2(float(source_depth) + 2.0)
+        ) ** self.depth_exploration_power
+
     def _uct_score(
         self,
         stat: UCTStat,
@@ -146,17 +176,16 @@ class GrammarUCTPolicy:
     ) -> tuple[float, float, float]:
         exploitation = stat.exploitation
         coefficient = self.exploration_coefficient()
-        exploration = coefficient * math.sqrt(
+        base_exploration = coefficient * math.sqrt(
             math.log(float(total_visits) + 2.0)
             / float(stat.visits + 1)
         )
-        depth_bonus = self.depth_focus * (
-            float(source_depth) / float(source_depth + 1)
-            if source_depth > 0
-            else 0.0
+        depth_multiplier = self.depth_exploration_multiplier(
+            source_depth
         )
+        exploration = base_exploration * depth_multiplier
         return (
-            exploitation + exploration + depth_bonus,
+            exploitation + exploration,
             exploitation,
             exploration,
         )
@@ -224,6 +253,7 @@ class GrammarUCTPolicy:
             "exploration_start": self.exploration_start,
             "exploration_end": self.exploration_end,
             "exploration_horizon": self.exploration_horizon,
+            "depth_exploration_power": self.depth_exploration_power,
             "depth_focus": self.depth_focus,
             "total_gene_generations": self.total_gene_generations,
             "total_decisions": self.total_decisions,
@@ -259,7 +289,10 @@ class GrammarUCTPolicy:
             exploration_horizon=int(
                 payload.get("exploration_horizon", 1_000_000)
             ),
-            depth_focus=float(payload.get("depth_focus", 0.08)),
+            depth_exploration_power=float(
+                payload.get("depth_exploration_power", 1.0)
+            ),
+            depth_focus=float(payload.get("depth_focus", 0.0)),
             total_gene_generations=int(
                 payload.get("total_gene_generations", 0)
             ),
@@ -855,7 +888,7 @@ def _select_source_for_operation(
         ranked.sort(
             key=lambda item: (
                 -item[0],
-                -item[1],
+                item[1],
                 item[2],
             )
         )
@@ -1098,6 +1131,47 @@ def _training_task_ids(data_root: str | Path | None) -> list[str]:
     return task_ids
 
 
+def _aggregate_depth_distribution(
+    distribution: dict[int, dict[str, list[float]]],
+) -> list[tuple[str, dict[str, list[float]]]]:
+    """Aggregate source depths into logarithmic bins for readable plots.
+
+    Bins preserve the early-depth detail most relevant to the grammar:
+        0, 1, 2-3, 4-7, 8-15, 16-31, ...
+    """
+    buckets: dict[
+        tuple[int, int],
+        dict[str, list[float]],
+    ] = {}
+
+    for depth, values in sorted(distribution.items()):
+        depth = max(0, int(depth))
+
+        if depth == 0:
+            bounds = (0, 0)
+        else:
+            lower = 1 << int(math.floor(math.log2(depth)))
+            bounds = (lower, (2 * lower) - 1)
+
+        bucket = buckets.setdefault(
+            bounds,
+            {
+                "exploitation": [],
+                "exploration": [],
+            },
+        )
+        bucket["exploitation"].extend(values["exploitation"])
+        bucket["exploration"].extend(values["exploration"])
+
+    result = []
+
+    for (lower, upper), values in sorted(buckets.items()):
+        label = str(lower) if lower == upper else f"{lower}-{upper}"
+        result.append((label, values))
+
+    return result
+
+
 def _plot_depth_distribution(
     policy: GrammarUCTPolicy,
     *,
@@ -1113,26 +1187,30 @@ def _plot_depth_distribution(
     if not distribution:
         return
 
-    depths = list(distribution)
+    aggregated = _aggregate_depth_distribution(distribution)
+    depth_labels = [label for label, _ in aggregated]
     exploitation = [
-        distribution[depth]["exploitation"]
-        for depth in depths
+        values["exploitation"]
+        for _, values in aggregated
     ]
     exploration = [
-        distribution[depth]["exploration"]
-        for depth in depths
+        values["exploration"]
+        for _, values in aggregated
     ]
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-    depth_positions = np.arange(1, len(depths) + 1)
-    depth_labels = [str(depth) for depth in depths]
+    depth_positions = np.arange(1, len(depth_labels) + 1)
 
     axes[0].boxplot(
         exploitation,
         showfliers=False,
     )
     axes[0].set_xticks(depth_positions)
-    axes[0].set_xticklabels(depth_labels)
+    axes[0].set_xticklabels(
+        depth_labels,
+        rotation=30,
+        ha="right",
+    )
     axes[0].set_title("Exploitation by source depth")
     axes[0].set_xlabel("Source depth")
     axes[0].set_ylabel("sqrt(solve credit / visits)")
@@ -1142,7 +1220,11 @@ def _plot_depth_distribution(
         showfliers=False,
     )
     axes[1].set_xticks(depth_positions)
-    axes[1].set_xticklabels(depth_labels)
+    axes[1].set_xticklabels(
+        depth_labels,
+        rotation=30,
+        ha="right",
+    )
     axes[1].set_title("Exploration bonus by source depth")
     axes[1].set_xlabel("Source depth")
     axes[1].set_ylabel("UCT exploration term")
@@ -1468,7 +1550,8 @@ def crawl_synth_v1(
     exploration_start: float = 8.0,
     exploration_end: float = 0.05,
     exploration_horizon: int = 1_000_000,
-    depth_focus: float = 0.08,
+    depth_exploration_power: float = 1.0,
+    depth_focus: float = 0.0,
     source_probe_attempts: int = 32,
     rng: np.random.Generator | int | None = None,
     data_root: str | Path | None = None,
@@ -1496,8 +1579,11 @@ def crawl_synth_v1(
     Exploitation is sqrt(solve_credit / visits). A newly successful GP solver
     sends reward backward through generated GP lineage with discount gamma.
 
-    The exploration coefficient decays exponentially from exploration_start to
-    exploration_end over exploration_horizon accepted GP gene generations.
+    The global exploration coefficient decays exponentially from
+    exploration_start to exploration_end over exploration_horizon accepted GP
+    gene generations. Source exploration is additionally depth-scaled by
+    (1 / log2(depth + 2)) ** depth_exploration_power, making shallow grammar
+    positions dominant early without permanently blocking deeper search.
     """
     for name, value in (
         ("max_GP", max_GP),
@@ -1553,6 +1639,9 @@ def crawl_synth_v1(
         policy.exploration_start = float(exploration_start)
         policy.exploration_end = float(exploration_end)
         policy.exploration_horizon = int(exploration_horizon)
+        policy.depth_exploration_power = float(
+            depth_exploration_power
+        )
         policy.depth_focus = float(depth_focus)
         policy.__post_init__()
     else:
@@ -1561,6 +1650,7 @@ def crawl_synth_v1(
             exploration_start=exploration_start,
             exploration_end=exploration_end,
             exploration_horizon=exploration_horizon,
+            depth_exploration_power=depth_exploration_power,
             depth_focus=depth_focus,
         )
 
