@@ -1124,20 +1124,25 @@ def _plot_depth_distribution(
     ]
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    depth_positions = np.arange(1, len(depths) + 1)
+    depth_labels = [str(depth) for depth in depths]
+
     axes[0].boxplot(
         exploitation,
-        labels=[str(depth) for depth in depths],
         showfliers=False,
     )
+    axes[0].set_xticks(depth_positions)
+    axes[0].set_xticklabels(depth_labels)
     axes[0].set_title("Exploitation by source depth")
     axes[0].set_xlabel("Source depth")
     axes[0].set_ylabel("sqrt(solve credit / visits)")
 
     axes[1].boxplot(
         exploration,
-        tick_labels=[str(depth) for depth in depths],
         showfliers=False,
     )
+    axes[1].set_xticks(depth_positions)
+    axes[1].set_xticklabels(depth_labels)
     axes[1].set_title("Exploration bonus by source depth")
     axes[1].set_xlabel("Source depth")
     axes[1].set_ylabel("UCT exploration term")
