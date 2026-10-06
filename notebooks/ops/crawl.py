@@ -641,6 +641,9 @@ class CrawlTaskAttempt:
     final_gp_len: int
     final_sp_len: int
     elapsed_seconds: float
+    exploration_history: list[
+        tuple[int, dict[int, float]]
+    ] = field(default_factory=list, repr=False)
 
 
 @dataclass
@@ -1131,6 +1134,201 @@ def _training_task_ids(data_root: str | Path | None) -> list[str]:
     return task_ids
 
 
+def _depth_bin_bounds(depth: int) -> tuple[int, int]:
+    depth = max(0, int(depth))
+
+    if depth == 0:
+        return (0, 0)
+
+    lower = 1 << int(math.floor(math.log2(depth)))
+    return (lower, (2 * lower) - 1)
+
+
+def _depth_bin_label(bounds: tuple[int, int]) -> str:
+    lower, upper = bounds
+    return str(lower) if lower == upper else f"{lower}-{upper}"
+
+
+def _depth_exploration_snapshot(
+    policy: GrammarUCTPolicy,
+) -> dict[int, float]:
+    """Return mean current exploration score at each exact source depth."""
+    distribution = policy.depth_distribution()
+    snapshot: dict[int, float] = {}
+
+    for depth, values in distribution.items():
+        exploration = values["exploration"]
+
+        if exploration:
+            snapshot[int(depth)] = float(
+                np.mean(np.asarray(exploration, dtype=float))
+            )
+
+    return snapshot
+
+
+def _format_operation_rank(
+    name: str,
+    stat: UCTStat,
+    policy: GrammarUCTPolicy,
+) -> str:
+    _, exploitation, exploration = policy.operation_score(name)
+    return (
+        f"{name}: exploit={exploitation:.4f}, "
+        f"explore={exploration:.4f}, "
+        f"visits={stat.visits}, "
+        f"credit={stat.solve_credit:.3f}"
+    )
+
+
+def _print_loaded_grammar_summary(
+    policy: GrammarUCTPolicy,
+    *,
+    top_n: int = 5,
+) -> None:
+    """Print a compact summary whenever a saved grammar is resumed."""
+    print(
+        "[loaded Grammar-UCT] "
+        f"GP generations={policy.total_gene_generations:,} | "
+        f"decisions={policy.total_decisions:,} | "
+        f"task attempts={policy.task_attempts:,} | "
+        f"solved tasks={len(policy.solved_task_ids)} | "
+        f"C={policy.exploration_coefficient():.4f}"
+    )
+
+    distribution = policy.depth_distribution()
+    aggregated = _aggregate_depth_distribution(distribution)
+
+    if aggregated:
+        print("  depth grammar:")
+        for label, values in aggregated:
+            exploitation = values["exploitation"]
+            exploration = values["exploration"]
+            exploit_mean = (
+                float(np.mean(np.asarray(exploitation, dtype=float)))
+                if exploitation
+                else 0.0
+            )
+            explore_mean = (
+                float(np.mean(np.asarray(exploration, dtype=float)))
+                if exploration
+                else 0.0
+            )
+            print(
+                f"    depth {label:>7}: "
+                f"exploit_mean={exploit_mean:.4f} | "
+                f"explore_mean={explore_mean:.4f} | "
+                f"nodes={len(exploitation)}"
+            )
+    else:
+        print("  depth grammar: no learned source statistics yet")
+
+    visited_operations = [
+        (name, stat)
+        for name, stat in policy.operation_stats.items()
+        if stat.visits > 0
+    ]
+
+    if not visited_operations:
+        print("  operations: no learned operation statistics yet")
+        return
+
+    strongest = sorted(
+        visited_operations,
+        key=lambda item: (
+            -item[1].exploitation,
+            -item[1].solve_credit,
+            -item[1].visits,
+            item[0],
+        ),
+    )[: max(1, int(top_n))]
+    weakest = sorted(
+        visited_operations,
+        key=lambda item: (
+            item[1].exploitation,
+            item[1].solve_credit,
+            -item[1].visits,
+            item[0],
+        ),
+    )[: max(1, int(top_n))]
+
+    print("  strongest operations:")
+    for name, stat in strongest:
+        print(f"    {_format_operation_rank(name, stat, policy)}")
+
+    print("  weakest operations:")
+    for name, stat in weakest:
+        print(f"    {_format_operation_rank(name, stat, policy)}")
+
+
+def _build_exploration_heatmap(
+    history: list[tuple[int, dict[int, float]]],
+    *,
+    max_columns: int = 500,
+) -> tuple[np.ndarray, list[str], list[int]]:
+    """Build a depth-bin x iteration matrix from task-local UCT history."""
+    if not history:
+        return np.empty((0, 0), dtype=float), [], []
+
+    if len(history) > max_columns:
+        selected = np.unique(
+            np.linspace(
+                0,
+                len(history) - 1,
+                max_columns,
+                dtype=int,
+            )
+        )
+        sampled = [history[int(index)] for index in selected]
+    else:
+        sampled = history
+
+    bounds = sorted(
+        {
+            _depth_bin_bounds(depth)
+            for _, snapshot in sampled
+            for depth in snapshot
+        }
+    )
+
+    if not bounds:
+        return np.empty((0, len(sampled)), dtype=float), [], [
+            int(iteration)
+            for iteration, _ in sampled
+        ]
+
+    row_for = {
+        depth_bounds: row
+        for row, depth_bounds in enumerate(bounds)
+    }
+    matrix = np.full(
+        (len(bounds), len(sampled)),
+        np.nan,
+        dtype=float,
+    )
+
+    for column, (_, snapshot) in enumerate(sampled):
+        grouped: dict[tuple[int, int], list[float]] = {}
+
+        for depth, value in snapshot.items():
+            grouped.setdefault(
+                _depth_bin_bounds(depth),
+                [],
+            ).append(float(value))
+
+        for depth_bounds, values in grouped.items():
+            matrix[row_for[depth_bounds], column] = float(
+                np.mean(np.asarray(values, dtype=float))
+            )
+
+    labels = [_depth_bin_label(depth_bounds) for depth_bounds in bounds]
+    iterations = [
+        int(iteration)
+        for iteration, _ in sampled
+    ]
+    return matrix, labels, iterations
+
+
 def _aggregate_depth_distribution(
     distribution: dict[int, dict[str, list[float]]],
 ) -> list[tuple[str, dict[str, list[float]]]]:
@@ -1145,13 +1343,7 @@ def _aggregate_depth_distribution(
     ] = {}
 
     for depth, values in sorted(distribution.items()):
-        depth = max(0, int(depth))
-
-        if depth == 0:
-            bounds = (0, 0)
-        else:
-            lower = 1 << int(math.floor(math.log2(depth)))
-            bounds = (lower, (2 * lower) - 1)
+        bounds = _depth_bin_bounds(depth)
 
         bucket = buckets.setdefault(
             bounds,
@@ -1166,7 +1358,7 @@ def _aggregate_depth_distribution(
     result = []
 
     for (lower, upper), values in sorted(buckets.items()):
-        label = str(lower) if lower == upper else f"{lower}-{upper}"
+        label = _depth_bin_label((lower, upper))
         result.append((label, values))
 
     return result
@@ -1176,6 +1368,9 @@ def _plot_depth_distribution(
     policy: GrammarUCTPolicy,
     *,
     title: str,
+    exploration_history: list[
+        tuple[int, dict[int, float]]
+    ] | None = None,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -1193,12 +1388,7 @@ def _plot_depth_distribution(
         values["exploitation"]
         for _, values in aggregated
     ]
-    exploration = [
-        values["exploration"]
-        for _, values in aggregated
-    ]
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     depth_positions = np.arange(1, len(depth_labels) + 1)
 
     axes[0].boxplot(
@@ -1215,19 +1405,69 @@ def _plot_depth_distribution(
     axes[0].set_xlabel("Source depth")
     axes[0].set_ylabel("sqrt(solve credit / visits)")
 
-    axes[1].boxplot(
-        exploration,
-        showfliers=False,
+    history = list(exploration_history or [])
+
+    if not history:
+        history = [
+            (
+                0,
+                _depth_exploration_snapshot(policy),
+            )
+        ]
+
+    heatmap, heatmap_labels, heatmap_iterations = (
+        _build_exploration_heatmap(history)
     )
-    axes[1].set_xticks(depth_positions)
-    axes[1].set_xticklabels(
-        depth_labels,
-        rotation=30,
-        ha="right",
-    )
-    axes[1].set_title("Exploration bonus by source depth")
-    axes[1].set_xlabel("Source depth")
-    axes[1].set_ylabel("UCT exploration term")
+
+    if heatmap.size > 0 and heatmap_labels:
+        image = axes[1].imshow(
+            np.ma.masked_invalid(heatmap),
+            aspect="auto",
+            interpolation="nearest",
+            origin="lower",
+        )
+        axes[1].set_yticks(
+            np.arange(len(heatmap_labels))
+        )
+        axes[1].set_yticklabels(heatmap_labels)
+
+        tick_count = min(7, len(heatmap_iterations))
+        tick_positions = np.unique(
+            np.linspace(
+                0,
+                len(heatmap_iterations) - 1,
+                tick_count,
+                dtype=int,
+            )
+        )
+        axes[1].set_xticks(tick_positions)
+        axes[1].set_xticklabels(
+            [
+                str(heatmap_iterations[int(position)])
+                for position in tick_positions
+            ],
+            rotation=30,
+            ha="right",
+        )
+        axes[1].set_title(
+            "Exploration by source depth × task iteration"
+        )
+        axes[1].set_xlabel("Task iteration")
+        axes[1].set_ylabel("Source depth")
+        colorbar = fig.colorbar(
+            image,
+            ax=axes[1],
+        )
+        colorbar.set_label("Mean UCT exploration term")
+    else:
+        axes[1].text(
+            0.5,
+            0.5,
+            "No exploration history yet",
+            ha="center",
+            va="center",
+        )
+        axes[1].set_axis_off()
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -1337,6 +1577,9 @@ def _run_crawl_task(
     gp_exhausted = False
     sp_exhausted = False
     stalled_iterations = 0
+    exploration_history: list[
+        tuple[int, dict[int, float]]
+    ] = []
 
     before_solver_ids = _solver_gene_ids(ST, GP_meta)
     _solve_frontier(
@@ -1354,6 +1597,12 @@ def _run_crawl_task(
     task_state.reward_solver_genes(
         policy,
         initial_new_solvers,
+    )
+    exploration_history.append(
+        (
+            0,
+            _depth_exploration_snapshot(policy),
+        )
     )
 
     while (
@@ -1476,6 +1725,13 @@ def _run_crawl_task(
         else:
             stalled_iterations += 1
 
+        exploration_history.append(
+            (
+                iterations,
+                _depth_exploration_snapshot(policy),
+            )
+        )
+
         if verbosity >= 2 and (
             iterations == 1
             or iterations % max(1, status_every) == 0
@@ -1504,6 +1760,7 @@ def _run_crawl_task(
                     f"{task_id} | total GP generations "
                     f"{policy.total_gene_generations:,}"
                 ),
+                exploration_history=exploration_history,
             )
 
         if stalled_iterations >= 25:
@@ -1530,6 +1787,7 @@ def _run_crawl_task(
         final_gp_len=len(GP_X),
         final_sp_len=len(SP_X),
         elapsed_seconds=float(elapsed),
+        exploration_history=exploration_history,
     )
 
     if solved_exactly:
@@ -1644,6 +1902,9 @@ def crawl_synth_v1(
         )
         policy.depth_focus = float(depth_focus)
         policy.__post_init__()
+
+        if verbosity >= 1:
+            _print_loaded_grammar_summary(policy)
     else:
         policy = GrammarUCTPolicy(
             gamma=gamma,
@@ -1788,6 +2049,7 @@ def crawl_synth_v1(
                         f"Grammar-UCT after "
                         f"{policy.total_gene_generations:,} GP generations"
                     ),
+                    exploration_history=attempt.exploration_history,
                 )
             except Exception as exc:
                 if verbosity >= 1:
