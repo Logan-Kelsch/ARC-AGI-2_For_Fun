@@ -19,6 +19,7 @@ from .ops import (
     OperationInfo,
     equivalent_gene_idx,
     sample_operation_params,
+    values_exactly_equal,
 )
 from .solve import (
     _candidate_2d_rule_solutions,
@@ -968,7 +969,10 @@ def _transition_exists(
             if key != BUNDLE_META_KEY
         }
 
-        if existing == _copy_params(params):
+        if values_exactly_equal(
+            existing,
+            _copy_params(params),
+        ):
             return True
 
     return False
@@ -1284,6 +1288,9 @@ def _build_bundled_registries() -> tuple[
     }
     return operations, inverses
 
+
+LEGACY_OP_REGISTRY = OP_REGISTRY
+LEGACY_INV_OP_REGISTRY = INV_OP_REGISTRY
 
 BUNDLED_OP_REGISTRY, BUNDLED_INV_OP_REGISTRY = (
     _build_bundled_registries()
