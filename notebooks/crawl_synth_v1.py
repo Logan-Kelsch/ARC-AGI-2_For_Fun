@@ -49,9 +49,19 @@ def _parse_args() -> argparse.Namespace:
         default=1_000_000,
     )
     parser.add_argument(
+        "--depth-exploration-power",
+        type=float,
+        default=1.0,
+        help=(
+            "Exponent applied to the logarithmic depth exploration discount. "
+            "1.0 gives 1/log2(depth+2)."
+        ),
+    )
+    parser.add_argument(
         "--depth-focus",
         type=float,
-        default=0.08,
+        default=0.0,
+        help="Deprecated compatibility parameter; no longer adds deep bias.",
     )
     parser.add_argument(
         "--source-probe-attempts",
@@ -89,6 +99,7 @@ def main() -> None:
         exploration_start=args.exploration_start,
         exploration_end=args.exploration_end,
         exploration_horizon=args.exploration_horizon,
+        depth_exploration_power=args.depth_exploration_power,
         depth_focus=args.depth_focus,
         source_probe_attempts=args.source_probe_attempts,
         rng=args.seed,
