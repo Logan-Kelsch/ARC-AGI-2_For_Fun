@@ -367,6 +367,18 @@ def _write_identity_task(root, task_id):
     )
 
 
+def test_seen_task_ids_persist_in_policy_state(tmp_path):
+    policy = GrammarUCTPolicy(
+        seen_task_ids={"a", "b"},
+    )
+    path = tmp_path / "grammar.json"
+    policy.save(path)
+
+    loaded = GrammarUCTPolicy.load(path)
+
+    assert loaded.seen_task_ids == {"a", "b"}
+
+
 def test_crawl_honors_first_task_order_and_removes_exact_solutions(tmp_path):
     _write_identity_task(tmp_path, "first")
     _write_identity_task(tmp_path, "second")
@@ -389,4 +401,5 @@ def test_crawl_honors_first_task_order_and_removes_exact_solutions(tmp_path):
         for attempt in result.attempts
     ] == ["second", "first"]
     assert result.solved_task_ids == {"first", "second"}
+    assert result.policy.seen_task_ids == {"first", "second"}
     assert result.policy.total_gene_generations == 0
