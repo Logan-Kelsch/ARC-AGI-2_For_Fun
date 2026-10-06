@@ -12,6 +12,7 @@ from notebooks.ops.crawl import (
     UCTStat,
     _DecisionRecord,
     _TaskUCTState,
+    _aggregate_depth_distribution,
     _build_depth0_coverage,
     crawl_synth_v1,
 )
@@ -53,6 +54,67 @@ def test_uct_exploration_decays_to_configured_floor_at_horizon():
         policy.exploration_coefficient(),
         0.05,
     )
+
+
+def test_source_exploration_is_log_scaled_down_by_depth():
+    policy = GrammarUCTPolicy(
+        exploration_start=8.0,
+        exploration_end=0.05,
+        depth_exploration_power=1.0,
+    )
+    policy.total_decisions = 100
+
+    def key(depth):
+        return GrammarSourceKey(
+            op_name="op",
+            source_depth=depth,
+            source_dims=(2,),
+            source_dtypes=("bool",),
+            source_shapes=("square:fixed:small",),
+        )
+
+    depth0 = policy.source_score(key(0))[2]
+    depth1 = policy.source_score(key(1))[2]
+    depth2 = policy.source_score(key(2))[2]
+    depth6 = policy.source_score(key(6))[2]
+
+    assert depth0 > depth1 > depth2 > depth6
+    assert math.isclose(
+        depth2 / depth0,
+        0.5,
+        rel_tol=1e-12,
+    )
+    assert math.isclose(
+        depth6 / depth0,
+        1.0 / 3.0,
+        rel_tol=1e-12,
+    )
+
+
+def test_depth_plot_distribution_uses_logarithmic_bins():
+    distribution = {
+        depth: {
+            "exploitation": [float(depth)],
+            "exploration": [float(depth) + 0.5],
+        }
+        for depth in range(18)
+    }
+
+    aggregated = _aggregate_depth_distribution(distribution)
+
+    assert [label for label, _ in aggregated] == [
+        "0",
+        "1",
+        "2-3",
+        "4-7",
+        "8-15",
+        "16-31",
+    ]
+    assert aggregated[2][1]["exploitation"] == [2.0, 3.0]
+    assert aggregated[4][1]["exploration"] == [
+        float(depth) + 0.5
+        for depth in range(8, 16)
+    ]
 
 
 def test_gamma_backpropagates_solver_credit_through_gp_decisions():
