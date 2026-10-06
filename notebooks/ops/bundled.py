@@ -1278,6 +1278,96 @@ def apply_bundled_inverse(
     return info.legacy.func(*args)
 
 
+def apply_bundled_inverse_gene(
+    meta: ProgramMeta,
+    X: ProgramX,
+    gidx: int,
+    sample_idx: int,
+    *,
+    inverse: str | BundledInverseOperationInfo | None = None,
+    context: Iterable[Any] = (),
+) -> Any:
+    """Apply an inverse once per component application stored in one gene.
+
+    The bundle manifest preserves application boundaries. This matters when one
+    operation call mapped over several compatible source components:
+
+        bool_complement(bundle_of_masks)
+
+    is one stored output gene but represents one inverse call per mask.
+
+    For a partition such as partition_composite, all color/mask rows produced
+    from one source component remain one application and are passed together to
+    the inverse.
+
+    context supplies any additional reconstruction arguments required by
+    context-dependent inverses (for example the original shape for trim).
+    """
+    gidx = int(gidx)
+    sample_idx = int(sample_idx)
+    manifest = bundle_manifest(meta, gidx)
+
+    if manifest is None:
+        raise ValueError(
+            "apply_bundled_inverse_gene requires a bundled generated gene."
+        )
+
+    op_name = str(meta.op[gidx])
+    refresh_bundled_registries()
+
+    if inverse is None:
+        try:
+            inverse_name = BUNDLED_OP_REGISTRY[op_name].inverse_op
+        except KeyError as exc:
+            raise KeyError(
+                f"No bundled operation metadata for {op_name!r}."
+            ) from exc
+
+        if inverse_name is None:
+            raise ValueError(
+                f"Bundled operation {op_name!r} has no inverse."
+            )
+
+        inverse_info = BUNDLED_INV_OP_REGISTRY[inverse_name]
+    elif isinstance(inverse, str):
+        inverse_info = BUNDLED_INV_OP_REGISTRY[inverse]
+    else:
+        inverse_info = inverse
+
+    value = X[gidx, sample_idx]
+    context = tuple(_copy_value(item) for item in context)
+    results: list[Any] = []
+
+    for application in manifest.get("applications", []):
+        outputs = [
+            _extract_component_value(
+                value,
+                tuple(int(v) for v in path),
+            )
+            for path in application.get("output_paths", [])
+        ]
+
+        args = [
+            *outputs,
+            *context,
+        ]
+        results.append(
+            inverse_info.legacy.func(*args)
+        )
+
+    if not results:
+        raise ValueError(
+            f"Bundled gene {gidx} has no inverse applications."
+        )
+
+    if len(results) == 1:
+        return _copy_value(results[0])
+
+    return _object_matrix(
+        [[result] for result in results]
+    )
+
+
 def _build_bundled_registries() -> tuple[
     dict[str, BundledOperationInfo],
     dict[str, BundledInverseOperationInfo],
