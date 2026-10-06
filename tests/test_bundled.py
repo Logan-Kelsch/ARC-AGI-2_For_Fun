@@ -8,6 +8,7 @@ from notebooks.ops.bundled import (
     ComponentPairEvaluationCache,
     GeneComponentRef,
     GP_generate_bundled,
+    GP_prune_bundled,
     apply_bundled_inverse,
     apply_bundled_inverse_gene,
     apply_bundled_operation,
@@ -15,9 +16,11 @@ from notebooks.ops.bundled import (
     component_ref,
     component_refs_for_gene,
     init_env_bundled,
+    materialize_legacy_environment,
     solve_bundled_frontier,
 )
 from notebooks.ops.environment import ProgramMeta, ProgramX
+from notebooks.ops.kelschinator import Kelschinator
 from notebooks.ops.inv_ops import INV_OP_REGISTRY
 from notebooks.ops.ops import OP_REGISTRY
 
@@ -434,6 +437,121 @@ def test_component_gene_extracts_virtual_leaf_without_materializing_new_gene():
 
     assert len(X) == before
     assert [int(value) for value in h_gene] == [2, 4]
+
+
+def test_solved_bundled_environment_materializes_for_kelschinator():
+    training = [
+        {
+            "input": [[0, 1], [1, 0]],
+            "output": [[0, 1], [1, 0]],
+        },
+        {
+            "input": [[2, 0], [0, 2]],
+            "output": [[2, 0], [0, 2]],
+        },
+    ]
+    GP_meta, GP_X, SP_meta, SP_X, ST = init_env_bundled(
+        training
+    )
+    cache = ComponentPairEvaluationCache()
+
+    solve_bundled_frontier(
+        GP_meta,
+        GP_X,
+        SP_meta,
+        SP_X,
+        ST,
+        cache,
+    )
+    assert ST.solved
+
+    (
+        legacy_GP_meta,
+        legacy_GP_X,
+        legacy_SP_meta,
+        legacy_SP_X,
+        legacy_ST,
+    ) = materialize_legacy_environment(
+        GP_meta,
+        GP_X,
+        SP_meta,
+        SP_X,
+        ST,
+    )
+
+    assert len(legacy_GP_X) > len(GP_X)
+    assert len(legacy_SP_X) > len(SP_X)
+    assert legacy_ST.solved
+
+    kelschinator = Kelschinator()
+    assert kelschinator.fit(legacy_ST)
+    test = np.array([[3, 0], [0, 3]], dtype=np.int64)
+    assert np.array_equal(
+        kelschinator.transform(test),
+        test,
+    )
+
+
+def test_bundled_prune_removes_only_safe_whole_genes():
+    grids = [
+        np.array([[0, 1], [1, 0]], dtype=np.int64),
+        np.array([[1, 0], [0, 1]], dtype=np.int64),
+    ]
+    meta, X = _program("GP", grids)
+
+    shape = apply_bundled_operation(
+        meta,
+        X,
+        "partition_shape",
+        0,
+    )
+    composite = apply_bundled_operation(
+        meta,
+        X,
+        "partition_composite",
+        0,
+    )
+    complement = apply_bundled_operation(
+        meta,
+        X,
+        "bool_complement",
+        composite,
+    )
+    cavity = apply_bundled_operation(
+        meta,
+        X,
+        "bool_cavity",
+        complement,
+    )
+
+    # Build a separate trivial bundled ST whose solver set is empty. The
+    # initialization-adjacent shape/composite genes remain protected by the
+    # parent<=0 guard; the leaf cavity is safe to prune.
+    _, _, sp_meta, sp_X, ST = init_env_bundled(
+        [
+            {
+                "input": grids[0],
+                "output": grids[0],
+            },
+            {
+                "input": grids[1],
+                "output": grids[1],
+            },
+        ]
+    )
+
+    removed = GP_prune_bundled(
+        meta,
+        X,
+        ST,
+        prune=1,
+        rng=0,
+    )
+
+    assert removed == [cavity]
+    assert len(X) == 4
+    assert shape < len(X)
+    assert composite < len(X)
 
 
 def test_bundled_gp_generation_adds_one_slot_per_operation():
