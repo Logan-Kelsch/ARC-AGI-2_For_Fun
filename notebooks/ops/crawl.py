@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from itertools import combinations, permutations
+from itertools import (
+    combinations,
+    combinations_with_replacement,
+    permutations,
+    product,
+)
 import json
 import math
 from pathlib import Path
@@ -12,6 +17,24 @@ from typing import Any, Iterable
 import numpy as np
 
 from .environment import ProgramMeta, ProgramX, SolutionTree, init_env
+from .bundled import (
+    BUNDLED_OP_REGISTRY,
+    BundledOperationInfo,
+    BundledSolutionTree,
+    ComponentPairEvaluationCache,
+    GP_prune_bundled,
+    SP_generate_bundled,
+    apply_bundled_operation,
+    build_bundled_operation_values,
+    component_dims,
+    component_dtype_strings,
+    component_gene,
+    component_refs_for_gene,
+    init_env_bundled,
+    materialize_legacy_environment,
+    refresh_bundled_registries,
+    solve_bundled_frontier,
+)
 from .kelschinator import Kelschinator
 from .ops import (
     GP_prune,
@@ -2199,5 +2222,1246 @@ def crawl_synth_v1(
         policy=policy,
         attempts=attempts,
         solved_task_ids=set(policy.solved_task_ids),
+        solutions=solutions,
+    )
+
+
+# ---------------------------------------------------------------------------
+# One-slot bundled crawl (v2)
+# ---------------------------------------------------------------------------
+
+def _bundled_source_key(
+    task_state: _TaskUCTState,
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    info: BundledOperationInfo,
+    source_idx: Any,
+) -> GrammarSourceKey:
+    """Describe one physical bundled-source choice for persistent Grammar-UCT.
+
+    The source depth is still the physical gene-tree depth. The phenotype
+    fields summarize all addressable semantic components inside each physical
+    source gene so the persistent grammar sees more than the container's
+    object-array dtype.
+    """
+    source_gidxs = tuple(
+        int(value)
+        for value in _source_tuple(source_idx)
+    )
+    depths: list[int] = []
+    per_source = []
+
+    for gidx in source_gidxs:
+        gene_id = GP_meta.stable_id(gidx)
+        depths.append(
+            int(task_state.gene_depth.get(gene_id, 0))
+        )
+        refs = component_refs_for_gene(
+            GP_meta,
+            GP_X,
+            gidx,
+        )
+        component_dims_values = [
+            int(component_dims(GP_meta, GP_X, ref))
+            for ref in refs
+        ]
+        dtype_values = sorted(
+            {
+                dtype
+                for ref in refs
+                for dtype in component_dtype_strings(
+                    GP_meta,
+                    GP_X,
+                    ref,
+                )
+            }
+        )
+        component_shapes = sorted(
+            {
+                _shape_signature(
+                    component_gene(
+                        GP_meta,
+                        GP_X,
+                        ref,
+                    )
+                )
+                for ref in refs
+            }
+        )
+        per_source.append(
+            (
+                max(component_dims_values, default=0),
+                "bundle[" + ",".join(dtype_values) + "]",
+                f"bundle:n={len(refs)}:"
+                + "|".join(component_shapes),
+            )
+        )
+
+    if not info.ordered_sources:
+        per_source = sorted(per_source)
+
+    return GrammarSourceKey(
+        op_name=info.name,
+        source_depth=max(depths, default=0),
+        source_dims=tuple(
+            int(item[0])
+            for item in per_source
+        ),
+        source_dtypes=tuple(
+            str(item[1])
+            for item in per_source
+        ),
+        source_shapes=tuple(
+            str(item[2])
+            for item in per_source
+        ),
+    )
+
+
+def _build_depth0_coverage_bundled(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    seed_gene_ids: tuple[int, ...],
+) -> list[_CoverageCandidate]:
+    """Build deterministic low-index brute-force coverage for one-slot GP."""
+    refresh_bundled_registries()
+    seed_gidxs = list(range(len(seed_gene_ids)))
+    infos = list(BUNDLED_OP_REGISTRY.values())
+    op_order = {
+        info.name: position
+        for position, info in enumerate(infos)
+    }
+    candidates = []
+
+    for info in infos:
+        if info.source_count == 1:
+            source_iterable = (
+                (gidx,)
+                for gidx in seed_gidxs
+            )
+        elif info.ordered_sources:
+            source_iterable = product(
+                seed_gidxs,
+                repeat=info.source_count,
+            )
+        else:
+            source_iterable = combinations_with_replacement(
+                seed_gidxs,
+                info.source_count,
+            )
+
+        for source in source_iterable:
+            source = tuple(
+                int(value)
+                for value in source
+            )
+            source_idx: Any = (
+                source[0]
+                if len(source) == 1
+                else source
+            )
+
+            try:
+                build_bundled_operation_values(
+                    GP_meta,
+                    GP_X,
+                    info,
+                    source_idx,
+                    params={},
+                )
+            except Exception:
+                continue
+
+            gene_ids = tuple(
+                seed_gene_ids[gidx]
+                for gidx in source
+            )
+            candidates.append(
+                (
+                    (
+                        max(source),
+                        len(source),
+                        source,
+                        op_order[info.name],
+                    ),
+                    _CoverageCandidate(
+                        op_name=info.name,
+                        source_gene_ids=gene_ids,
+                    ),
+                )
+            )
+
+    candidates.sort(key=lambda item: item[0])
+    return [
+        candidate
+        for _, candidate in candidates
+    ]
+
+
+def _initialize_bundled_task_state(
+    run_id: int,
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    policy: GrammarUCTPolicy,
+    rng: np.random.Generator,
+) -> _TaskUCTState:
+    seed_gene_ids = tuple(
+        GP_meta.stable_id(gidx)
+        for gidx in range(len(GP_meta))
+    )
+    state = _TaskUCTState(
+        run_id=int(run_id),
+        seed_gene_ids=seed_gene_ids,
+        gene_depth={
+            gene_id: 0
+            for gene_id in seed_gene_ids
+        },
+        phenotype_cache={},
+        coverage_queue=deque(),
+    )
+    coverage = _build_depth0_coverage_bundled(
+        GP_meta,
+        GP_X,
+        seed_gene_ids,
+    )
+    probability = min(
+        1.0,
+        policy.exploration_coefficient(),
+    )
+
+    if probability < 1.0:
+        coverage = [
+            candidate
+            for candidate in coverage
+            if float(rng.random()) < probability
+        ]
+
+    state.coverage_queue = deque(coverage)
+    return state
+
+
+def _bundled_physical_source_candidates(
+    info: BundledOperationInfo,
+    gene_count: int,
+    *,
+    rng: np.random.Generator,
+    source_probe_attempts: int,
+) -> list[Any]:
+    """Return a bounded set of physical source tuples for one bundled op."""
+    if info.source_count == 1:
+        return list(range(gene_count))
+
+    if gene_count <= 24:
+        if info.ordered_sources:
+            raw = product(
+                range(gene_count),
+                repeat=info.source_count,
+            )
+        else:
+            raw = combinations_with_replacement(
+                range(gene_count),
+                info.source_count,
+            )
+        return [
+            tuple(int(value) for value in source)
+            for source in raw
+        ]
+
+    target = max(
+        int(source_probe_attempts),
+        info.source_count * 4,
+    )
+    seen: set[tuple[int, ...]] = set()
+
+    base = tuple(
+        min(index, gene_count - 1)
+        for index in range(info.source_count)
+    )
+    if not info.ordered_sources:
+        base = tuple(sorted(base))
+    seen.add(base)
+
+    while len(seen) < target:
+        source = tuple(
+            int(rng.integers(gene_count))
+            for _ in range(info.source_count)
+        )
+        if not info.ordered_sources:
+            source = tuple(sorted(source))
+        seen.add(source)
+
+    return list(seen)
+
+
+def _select_bundled_source_for_operation(
+    policy: GrammarUCTPolicy,
+    task_state: _TaskUCTState,
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    info: BundledOperationInfo,
+    params: dict[str, Any],
+    *,
+    rng: np.random.Generator,
+    source_probe_attempts: int,
+) -> tuple[Any, GrammarSourceKey] | None:
+    candidates = _bundled_physical_source_candidates(
+        info,
+        len(GP_X),
+        rng=rng,
+        source_probe_attempts=source_probe_attempts,
+    )
+    best = None
+
+    for source_idx in candidates:
+        if task_state.has_attempted(
+            GP_meta,
+            info,
+            source_idx,
+            params,
+        ):
+            continue
+
+        try:
+            build_bundled_operation_values(
+                GP_meta,
+                GP_X,
+                info,
+                source_idx,
+                params=params,
+            )
+        except Exception:
+            task_state.mark_attempted(
+                GP_meta,
+                info,
+                source_idx,
+                params,
+            )
+            continue
+
+        key = _bundled_source_key(
+            task_state,
+            GP_meta,
+            GP_X,
+            info,
+            source_idx,
+        )
+        score = policy.source_score(key)[0]
+        source_tuple = tuple(
+            int(value)
+            for value in _source_tuple(source_idx)
+        )
+        depth = max(
+            (
+                task_state.gene_depth.get(
+                    GP_meta.stable_id(gidx),
+                    0,
+                )
+                for gidx in source_tuple
+            ),
+            default=0,
+        )
+        candidate = (
+            float(score),
+            -int(depth),
+            tuple(source_tuple),
+            source_idx,
+            key,
+        )
+
+        if best is None or candidate[:3] > best[:3]:
+            best = candidate
+
+    if best is None:
+        return None
+
+    task_state.mark_attempted(
+        GP_meta,
+        info,
+        best[3],
+        params,
+    )
+    return best[3], best[4]
+
+
+def _next_uct_candidate_bundled(
+    policy: GrammarUCTPolicy,
+    task_state: _TaskUCTState,
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    *,
+    rng: np.random.Generator,
+    source_probe_attempts: int,
+    operation_selection: str,
+):
+    """Depth-0 coverage first, then operation->source UCT for one-slot GP."""
+    refresh_bundled_registries()
+    stable_to_gidx = task_state.stable_to_gidx(
+        GP_meta
+    )
+
+    while task_state.coverage_queue:
+        candidate = task_state.coverage_queue.popleft()
+
+        if any(
+            gene_id not in stable_to_gidx
+            for gene_id in candidate.source_gene_ids
+        ):
+            continue
+
+        info = BUNDLED_OP_REGISTRY.get(
+            candidate.op_name
+        )
+        if info is None:
+            continue
+
+        source_tuple = tuple(
+            stable_to_gidx[gene_id]
+            for gene_id in candidate.source_gene_ids
+        )
+        source_idx: Any = (
+            source_tuple[0]
+            if len(source_tuple) == 1
+            else source_tuple
+        )
+        params = sample_operation_params(
+            info.legacy,
+            rng,
+        )
+
+        if task_state.has_attempted(
+            GP_meta,
+            info,
+            source_idx,
+            params,
+        ):
+            continue
+
+        try:
+            build_bundled_operation_values(
+                GP_meta,
+                GP_X,
+                info,
+                source_idx,
+                params=params,
+            )
+        except Exception:
+            task_state.mark_attempted(
+                GP_meta,
+                info,
+                source_idx,
+                params,
+            )
+            continue
+
+        task_state.mark_attempted(
+            GP_meta,
+            info,
+            source_idx,
+            params,
+        )
+        return (
+            info,
+            source_idx,
+            params,
+            _bundled_source_key(
+                task_state,
+                GP_meta,
+                GP_X,
+                info,
+                source_idx,
+            ),
+        )
+
+    remaining = list(
+        BUNDLED_OP_REGISTRY.values()
+    )
+
+    while remaining:
+        info = _choose_operation(
+            policy,
+            remaining,
+            selection_mode=operation_selection,
+            rng=rng,
+        )
+        params = sample_operation_params(
+            info.legacy,
+            rng,
+        )
+        selected = _select_bundled_source_for_operation(
+            policy,
+            task_state,
+            GP_meta,
+            GP_X,
+            info,
+            params,
+            rng=rng,
+            source_probe_attempts=source_probe_attempts,
+        )
+
+        if selected is not None:
+            source_idx, source_key = selected
+            return (
+                info,
+                source_idx,
+                params,
+                source_key,
+            )
+
+        remaining = [
+            candidate
+            for candidate in remaining
+            if candidate.name != info.name
+        ]
+
+    return None
+
+
+def _bundled_solver_gene_ids(
+    ST: BundledSolutionTree,
+) -> set[int]:
+    return {
+        int(node.gp_ref.gene_id)
+        for node in ST.nodes.values()
+        if node.gp_ref is not None
+    }
+
+
+def _bundled_st_progress(
+    ST: BundledSolutionTree,
+) -> tuple[int, int, float]:
+    if not ST.roots:
+        return 0, 0, 1.0
+
+    from .environment import STInverseRef, STNodeRef, STSet
+
+    reachable: set[Any] = set()
+
+    def visit_requirement(requirement: Any) -> None:
+        if isinstance(requirement, STInverseRef):
+            return
+        if isinstance(requirement, STNodeRef):
+            visit_node(requirement.node_id)
+            return
+        if isinstance(requirement, STSet):
+            for member in requirement.members:
+                visit_requirement(member)
+
+    def visit_node(node_id: Any) -> None:
+        if node_id in reachable:
+            return
+        reachable.add(node_id)
+        node = ST[node_id]
+
+        if node.derivation is not None:
+            visit_requirement(node.derivation)
+
+    for root in ST.roots:
+        visit_node(root)
+
+    concrete = [
+        node_id
+        for node_id in reachable
+        if ST[node_id].sp_ref is not None
+    ]
+    total = len(concrete)
+
+    if total == 0:
+        return 0, 0, 1.0
+
+    solved = sum(
+        1
+        for node_id in concrete
+        if ST.is_solved(node_id)
+    )
+    return solved, total, solved / total
+
+
+def _fit_bundled_kelschinator(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    SP_meta: ProgramMeta,
+    SP_X: ProgramX,
+    ST: BundledSolutionTree,
+) -> Kelschinator | None:
+    """Compile a solved bundled proof through an ephemeral legacy view."""
+    try:
+        (
+            _,
+            _,
+            _,
+            _,
+            legacy_ST,
+        ) = materialize_legacy_environment(
+            GP_meta,
+            GP_X,
+            SP_meta,
+            SP_X,
+            ST,
+        )
+        kelschinator = Kelschinator()
+
+        if kelschinator.fit(legacy_ST):
+            return kelschinator
+    except Exception:
+        return None
+
+    return None
+
+
+def _run_crawl_task_v2(
+    task_id: str,
+    policy: GrammarUCTPolicy,
+    *,
+    run_id: int,
+    max_GP: int,
+    max_SP: int,
+    prune_size_GP: int,
+    task_generation_budget: int,
+    global_generation_budget: int,
+    source_probe_attempts: int,
+    operation_selection: str,
+    rng: np.random.Generator,
+    data_root: str | Path | None,
+    verbosity: int,
+    status_every: int,
+    plot_every_generations: int,
+) -> tuple[CrawlTaskAttempt, Kelschinator | None]:
+    """Run one persistent-policy crawl attempt using one-slot genes."""
+    started = perf_counter()
+    task = _load_task_by_id(
+        task_id,
+        data_root=data_root,
+        split="training",
+    )
+    (
+        GP_meta,
+        GP_X,
+        SP_meta,
+        SP_X,
+        ST,
+    ) = init_env_bundled(task.train)
+
+    task_state = _initialize_bundled_task_state(
+        run_id,
+        GP_meta,
+        GP_X,
+        policy,
+        rng,
+    )
+    evaluation_cache = ComponentPairEvaluationCache()
+    generated_this_task = 0
+    iterations = 0
+    gp_exhausted = False
+    sp_exhausted = False
+    stalled_iterations = 0
+    exploration_history = []
+
+    before_solver_ids = _bundled_solver_gene_ids(ST)
+    solve_bundled_frontier(
+        GP_meta,
+        GP_X,
+        SP_meta,
+        SP_X,
+        ST,
+        evaluation_cache,
+    )
+    initial_new_solvers = (
+        _bundled_solver_gene_ids(ST)
+        - before_solver_ids
+    )
+    task_state.reward_solver_genes(
+        policy,
+        initial_new_solvers,
+    )
+    exploration_history.append(
+        (
+            0,
+            _depth_exploration_snapshot(policy),
+        )
+    )
+
+    while (
+        not ST.solved
+        and generated_this_task < task_generation_budget
+        and policy.total_gene_generations < global_generation_budget
+    ):
+        iterations += 1
+        iteration_progress = False
+
+        if len(GP_X) >= max_GP:
+            if prune_size_GP > 0:
+                removed = GP_prune_bundled(
+                    GP_meta,
+                    GP_X,
+                    ST,
+                    prune=prune_size_GP,
+                    rng=rng,
+                )
+                if removed:
+                    iteration_progress = True
+                else:
+                    gp_exhausted = True
+            else:
+                gp_exhausted = True
+
+        if not gp_exhausted and len(GP_X) < max_GP:
+            candidate = _next_uct_candidate_bundled(
+                policy,
+                task_state,
+                GP_meta,
+                GP_X,
+                rng=rng,
+                source_probe_attempts=source_probe_attempts,
+                operation_selection=operation_selection,
+            )
+
+            if candidate is None:
+                gp_exhausted = True
+            else:
+                (
+                    info,
+                    source_idx,
+                    params,
+                    source_key,
+                ) = candidate
+                decision_id = policy.record_attempt(
+                    info.name,
+                    source_key,
+                )
+
+                try:
+                    generated_gidx = apply_bundled_operation(
+                        GP_meta,
+                        GP_X,
+                        info,
+                        source_idx,
+                        params=params,
+                    )
+                except Exception:
+                    generated_gidx = None
+
+                if generated_gidx is not None:
+                    task_state.register_generation(
+                        policy,
+                        GP_meta,
+                        decision_id,
+                        info,
+                        source_idx,
+                        source_key,
+                        [generated_gidx],
+                    )
+                    generated_this_task += 1
+                    iteration_progress = True
+
+        if (
+            not sp_exhausted
+            and not ST.solved
+            and len(SP_X) < max_SP
+        ):
+            generated_sp = SP_generate_bundled(
+                SP_meta,
+                SP_X,
+                ST,
+                rng=rng,
+            )
+            if generated_sp:
+                iteration_progress = True
+            else:
+                sp_exhausted = True
+        elif len(SP_X) >= max_SP:
+            sp_exhausted = True
+
+        before_solver_ids = _bundled_solver_gene_ids(ST)
+        solve_bundled_frontier(
+            GP_meta,
+            GP_X,
+            SP_meta,
+            SP_X,
+            ST,
+            evaluation_cache,
+        )
+        new_solver_ids = (
+            _bundled_solver_gene_ids(ST)
+            - before_solver_ids
+        )
+
+        if new_solver_ids:
+            iteration_progress = True
+            task_state.reward_solver_genes(
+                policy,
+                new_solver_ids,
+            )
+
+        if (
+            len(GP_X) > max_GP
+            and prune_size_GP > 0
+            and not ST.solved
+        ):
+            GP_prune_bundled(
+                GP_meta,
+                GP_X,
+                ST,
+                prune=prune_size_GP,
+                rng=rng,
+            )
+
+        if iteration_progress:
+            stalled_iterations = 0
+        else:
+            stalled_iterations += 1
+
+        exploration_history.append(
+            (
+                iterations,
+                _depth_exploration_snapshot(policy),
+            )
+        )
+
+        if verbosity >= 2 and (
+            iterations == 1
+            or iterations % max(1, status_every) == 0
+            or ST.solved
+        ):
+            solved_nodes, total_nodes, proportion = (
+                _bundled_st_progress(ST)
+            )
+            print(
+                f"  iter={iterations} "
+                f"task_genes={generated_this_task} "
+                f"total_genes={policy.total_gene_generations} "
+                f"C={policy.exploration_coefficient():.4f} "
+                f"ST={solved_nodes}/{total_nodes} "
+                f"({proportion:.1%}) "
+                f"GP={len(GP_X)} SP={len(SP_X)} "
+                f"[one-slot]"
+            )
+
+        if (
+            verbosity >= 3
+            and plot_every_generations > 0
+            and generated_this_task > 0
+            and generated_this_task % plot_every_generations == 0
+        ):
+            _plot_depth_distribution(
+                policy,
+                title=(
+                    f"{task_id} | one-slot total GP generations "
+                    f"{policy.total_gene_generations:,}"
+                ),
+                exploration_history=exploration_history,
+            )
+
+        if stalled_iterations >= 25:
+            break
+
+        if (
+            gp_exhausted
+            and sp_exhausted
+            and not iteration_progress
+        ):
+            break
+
+    kelschinator = None
+    solved_exactly = False
+
+    if ST.solved:
+        kelschinator = _fit_bundled_kelschinator(
+            GP_meta,
+            GP_X,
+            SP_meta,
+            SP_X,
+            ST,
+        )
+
+        if kelschinator is not None:
+            try:
+                solved_exactly = _exact_test_match(
+                    task,
+                    kelschinator,
+                )
+            except Exception:
+                solved_exactly = False
+
+    elapsed = perf_counter() - started
+    attempt = CrawlTaskAttempt(
+        task_id=task_id,
+        solved_exactly=bool(solved_exactly),
+        generated_genes=int(generated_this_task),
+        iterations=int(iterations),
+        final_gp_len=len(GP_X),
+        final_sp_len=len(SP_X),
+        elapsed_seconds=float(elapsed),
+        exploration_history=exploration_history,
+    )
+
+    if solved_exactly:
+        return attempt, kelschinator
+
+    return attempt, None
+
+
+def crawl_synth_v2(
+    first_tasks: list[str] | None = None,
+    *,
+    max_GP: int = 300,
+    max_SP: int = 30,
+    prune_size_GP: int = 10,
+    max_total_generations: int = 1_000_000,
+    max_task_generations: int | None = None,
+    gamma: float = 0.85,
+    exploration_start: float = 8.0,
+    exploration_end: float = 0.05,
+    exploration_horizon: int = 1_000_000,
+    depth_exploration_power: float = 1.0,
+    depth_focus: float = 0.0,
+    operation_selection: str = "l1",
+    source_probe_attempts: int = 32,
+    rng: np.random.Generator | int | None = None,
+    data_root: str | Path | None = None,
+    select_residual_max_destinations: int = 5,
+    verbosity: int = 1,
+    status_every: int = 100,
+    plot_every_generations: int = 500,
+    state_path: str | Path | None = None,
+    show_success_plots: bool = True,
+    stall_task_limit: int = 50,
+) -> CrawlResult:
+    """Grammar-UCT crawl over the one-slot bundled gene representation.
+
+    Scheduling, persistent policy, UCT statistics, task replacement semantics,
+    saved grammar state, plots, and reward backpropagation match v1.
+
+    Each accepted GP/SP operation appends one physical gene. ST leaves are
+    GeneComponentRef values, component comparisons use the sparse component
+    cache, and solved proofs are flattened only temporarily for Kelschinator.
+
+    select_residual_max_destinations is accepted for call compatibility with
+    v1. The select-residual initializer is a legacy non-registry helper and is
+    intentionally not materialized by init_env_bundled yet.
+
+    A separate state_path from v1 is recommended because v2 source phenotypes
+    summarize bundled component sets rather than legacy scalar/matrix genes.
+    """
+    del select_residual_max_destinations
+
+    for name, value in (
+        ("max_GP", max_GP),
+        ("max_SP", max_SP),
+        ("prune_size_GP", prune_size_GP),
+        ("max_total_generations", max_total_generations),
+        ("source_probe_attempts", source_probe_attempts),
+        ("status_every", status_every),
+        ("stall_task_limit", stall_task_limit),
+    ):
+        if isinstance(value, bool) or int(value) < 0:
+            raise ValueError(
+                f"{name} must be a non-negative integer."
+            )
+
+    max_GP = int(max_GP)
+    max_SP = int(max_SP)
+    prune_size_GP = int(prune_size_GP)
+    max_total_generations = int(max_total_generations)
+    source_probe_attempts = int(source_probe_attempts)
+    status_every = int(status_every)
+    stall_task_limit = int(stall_task_limit)
+
+    operation_selection = str(
+        operation_selection
+    ).strip().lower()
+
+    if operation_selection not in {
+        "l1",
+        "softmax",
+        "argmax",
+    }:
+        raise ValueError(
+            "operation_selection must be one of "
+            "'l1', 'softmax', or 'argmax'."
+        )
+
+    if max_GP < 3:
+        raise ValueError(
+            "max_GP must be >= 3 for raw + shape + composite."
+        )
+    if max_SP < 3:
+        raise ValueError(
+            "max_SP must be >= 3 for raw + shape + composite."
+        )
+    if source_probe_attempts < 1:
+        raise ValueError(
+            "source_probe_attempts must be >= 1."
+        )
+    if stall_task_limit < 1:
+        raise ValueError(
+            "stall_task_limit must be >= 1."
+        )
+    if (
+        isinstance(verbosity, bool)
+        or verbosity not in {0, 1, 2, 3}
+    ):
+        raise ValueError(
+            "verbosity must be one of 0, 1, 2, or 3."
+        )
+
+    if max_task_generations is None:
+        max_task_generations = max_GP
+    if (
+        isinstance(max_task_generations, bool)
+        or int(max_task_generations) < 1
+    ):
+        raise ValueError(
+            "max_task_generations must be a positive integer."
+        )
+    max_task_generations = int(
+        max_task_generations
+    )
+
+    rng = (
+        rng
+        if isinstance(rng, np.random.Generator)
+        else np.random.default_rng(rng)
+    )
+    state_file = (
+        None
+        if state_path is None
+        else Path(state_path)
+    )
+
+    if (
+        state_file is not None
+        and state_file.exists()
+    ):
+        policy = GrammarUCTPolicy.load(
+            state_file
+        )
+        policy.gamma = float(gamma)
+        policy.exploration_start = float(
+            exploration_start
+        )
+        policy.exploration_end = float(
+            exploration_end
+        )
+        policy.exploration_horizon = int(
+            exploration_horizon
+        )
+        policy.depth_exploration_power = float(
+            depth_exploration_power
+        )
+        policy.depth_focus = float(depth_focus)
+        policy.__post_init__()
+
+        if verbosity >= 1:
+            print("[one-slot v2 grammar]")
+            _print_loaded_grammar_summary(policy)
+    else:
+        policy = GrammarUCTPolicy(
+            gamma=gamma,
+            exploration_start=exploration_start,
+            exploration_end=exploration_end,
+            exploration_horizon=exploration_horizon,
+            depth_exploration_power=depth_exploration_power,
+            depth_focus=depth_focus,
+        )
+
+    training_task_ids = _training_task_ids(
+        data_root
+    )
+    training_set = set(training_task_ids)
+    first_queue = deque(
+        str(task_id)
+        for task_id in (first_tasks or [])
+    )
+    unknown_first = [
+        task_id
+        for task_id in first_queue
+        if task_id not in training_set
+    ]
+
+    if unknown_first:
+        raise ValueError(
+            "first_tasks contains task IDs not present in the training set: "
+            + ", ".join(unknown_first)
+        )
+
+    policy.solved_task_ids.intersection_update(
+        training_set
+    )
+    policy.seen_task_ids.intersection_update(
+        training_set
+    )
+    unsolved = (
+        training_set
+        - policy.solved_task_ids
+    )
+    attempts: list[CrawlTaskAttempt] = []
+    solutions: dict[str, Kelschinator] = {}
+    zero_progress_task_attempts = 0
+
+    while (
+        unsolved
+        and policy.total_gene_generations
+        < max_total_generations
+    ):
+        task_id = None
+        selection_mode = "priority"
+
+        while first_queue and task_id is None:
+            candidate = first_queue.popleft()
+            if candidate in unsolved:
+                task_id = candidate
+
+        if task_id is None:
+            selection_mode = (
+                "random-with-replacement"
+            )
+            choices = sorted(unsolved)
+            task_id = choices[
+                int(rng.integers(len(choices)))
+            ]
+
+        policy.task_attempts += 1
+        policy.seen_task_ids.add(task_id)
+        run_id = policy.task_attempts
+
+        if verbosity >= 1:
+            print(
+                f"[crawl v2 task {run_id}] {task_id} | "
+                f"selection={selection_mode} | "
+                f"unique_seen={len(policy.seen_task_ids)}/{len(training_set)} | "
+                f"solved={len(policy.solved_task_ids)}/{len(training_set)} | "
+                f"GP generations={policy.total_gene_generations:,} | "
+                f"C={policy.exploration_coefficient():.4f} | "
+                "representation=one-slot"
+            )
+
+        remaining_global = (
+            max_total_generations
+            - policy.total_gene_generations
+        )
+        task_budget = min(
+            max_task_generations,
+            max(1, remaining_global),
+        )
+
+        attempt, solution = _run_crawl_task_v2(
+            task_id,
+            policy,
+            run_id=run_id,
+            max_GP=max_GP,
+            max_SP=max_SP,
+            prune_size_GP=prune_size_GP,
+            task_generation_budget=task_budget,
+            global_generation_budget=(
+                max_total_generations
+            ),
+            source_probe_attempts=(
+                source_probe_attempts
+            ),
+            operation_selection=(
+                operation_selection
+            ),
+            rng=rng,
+            data_root=data_root,
+            verbosity=verbosity,
+            status_every=status_every,
+            plot_every_generations=(
+                plot_every_generations
+            ),
+        )
+        attempts.append(attempt)
+
+        if (
+            attempt.generated_genes == 0
+            and not attempt.solved_exactly
+        ):
+            zero_progress_task_attempts += 1
+        else:
+            zero_progress_task_attempts = 0
+
+        if (
+            attempt.solved_exactly
+            and solution is not None
+        ):
+            policy.solved_task_ids.add(task_id)
+            unsolved.discard(task_id)
+            solutions[task_id] = solution
+
+            if verbosity >= 1:
+                print(
+                    f"  SOLVED {task_id} in "
+                    f"{attempt.elapsed_seconds:.2f}s "
+                    f"with {attempt.generated_genes} "
+                    "one-slot GP genes."
+                )
+
+            if show_success_plots:
+                try:
+                    task = _load_task_by_id(
+                        task_id,
+                        data_root=data_root,
+                        split="training",
+                    )
+                    _plot_success(
+                        task_id,
+                        task,
+                        solution,
+                    )
+                except Exception as exc:
+                    if verbosity >= 1:
+                        print(
+                            "  warning: success visualization failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+        elif verbosity >= 1:
+            print(
+                f"  unresolved after "
+                f"{attempt.generated_genes} one-slot GP genes "
+                f"({attempt.elapsed_seconds:.2f}s)"
+            )
+
+        if state_file is not None:
+            policy.save(state_file)
+
+        if verbosity >= 3:
+            try:
+                _plot_depth_distribution(
+                    policy,
+                    title=(
+                        "Grammar-UCT v2 after "
+                        f"{policy.total_gene_generations:,} "
+                        "one-slot GP generations"
+                    ),
+                    exploration_history=(
+                        attempt.exploration_history
+                    ),
+                )
+            except Exception as exc:
+                if verbosity >= 1:
+                    print(
+                        "  warning: UCT depth visualization failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+        if (
+            zero_progress_task_attempts
+            >= stall_task_limit
+        ):
+            if verbosity >= 1:
+                print(
+                    "Stopping one-slot crawl after repeated "
+                    "zero-generation unresolved task attempts."
+                )
+            break
+
+    if state_file is not None:
+        policy.save(state_file)
+
+    return CrawlResult(
+        policy=policy,
+        attempts=attempts,
+        solved_task_ids=set(
+            policy.solved_task_ids
+        ),
         solutions=solutions,
     )
