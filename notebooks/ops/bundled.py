@@ -989,13 +989,38 @@ def _component_combinations(
     meta: ProgramMeta,
     X: ProgramX,
     source_gidxs: tuple[int, ...],
+    *,
+    ordered_sources: bool,
 ) -> Iterable[tuple[GeneComponentRef, ...]]:
+    """Yield logical source tuples independently of physical bundle slots.
+
+    A multi-source operation may legitimately draw two distinct components from
+    the same stored bundle. Component identity, rather than physical gidx
+    identity, therefore determines whether operands are distinct.
+    """
     ref_lists = [
         component_refs_for_gene(meta, X, gidx)
         for gidx in source_gidxs
     ]
+    seen: set[tuple[GeneComponentRef, ...]] = set()
 
-    return itertools.product(*ref_lists)
+    for refs in itertools.product(*ref_lists):
+        # Legacy multi-source operations never used one exact gene twice. Keep
+        # that semantic constraint at component granularity.
+        if len(refs) > 1 and len(set(refs)) != len(refs):
+            continue
+
+        key = (
+            tuple(refs)
+            if ordered_sources
+            else tuple(sorted(refs))
+        )
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        yield tuple(refs)
 
 
 def build_bundled_operation_values(
@@ -1036,6 +1061,7 @@ def build_bundled_operation_values(
         meta,
         X,
         source_gidxs,
+        ordered_sources=legacy.ordered_sources,
     ):
         source_genes = [
             component_gene(meta, X, ref)
@@ -1423,16 +1449,19 @@ def _source_gene_candidates(
 
     indices = range(gene_count)
 
+    # Repetition at the physical-gene level is intentional: one bundle can
+    # contain multiple distinct semantic leaves that satisfy a binary op.
+    # Exact repeated component refs are filtered later.
     if info.ordered_sources:
         return list(
-            itertools.permutations(
+            itertools.product(
                 indices,
-                info.source_count,
+                repeat=info.source_count,
             )
         )
 
     return list(
-        itertools.combinations(
+        itertools.combinations_with_replacement(
             indices,
             info.source_count,
         )
