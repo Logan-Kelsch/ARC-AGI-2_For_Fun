@@ -90,6 +90,7 @@ class GrammarUCTPolicy:
     total_decisions: int = 0
     task_attempts: int = 0
     solved_task_ids: set[str] = field(default_factory=set)
+    seen_task_ids: set[str] = field(default_factory=set)
     operation_stats: dict[str, UCTStat] = field(default_factory=dict)
     source_stats: dict[GrammarSourceKey, UCTStat] = field(default_factory=dict)
 
@@ -121,6 +122,10 @@ class GrammarUCTPolicy:
         self.solved_task_ids = {
             str(task_id)
             for task_id in self.solved_task_ids
+        }
+        self.seen_task_ids = {
+            str(task_id)
+            for task_id in self.seen_task_ids
         }
 
     def exploration_coefficient(self) -> float:
@@ -259,6 +264,7 @@ class GrammarUCTPolicy:
             "total_decisions": self.total_decisions,
             "task_attempts": self.task_attempts,
             "solved_task_ids": sorted(self.solved_task_ids),
+            "seen_task_ids": sorted(self.seen_task_ids),
             "operation_stats": {
                 name: asdict(stat)
                 for name, stat in self.operation_stats.items()
@@ -299,6 +305,7 @@ class GrammarUCTPolicy:
             total_decisions=int(payload.get("total_decisions", 0)),
             task_attempts=int(payload.get("task_attempts", 0)),
             solved_task_ids=set(payload.get("solved_task_ids", [])),
+            seen_task_ids=set(payload.get("seen_task_ids", [])),
         )
 
         policy.operation_stats = {
@@ -1192,6 +1199,7 @@ def _print_loaded_grammar_summary(
         f"GP generations={policy.total_gene_generations:,} | "
         f"decisions={policy.total_decisions:,} | "
         f"task attempts={policy.task_attempts:,} | "
+        f"unique tasks seen={len(policy.seen_task_ids)} | "
         f"solved tasks={len(policy.solved_task_ids)} | "
         f"C={policy.exploration_coefficient():.4f}"
     )
@@ -1935,6 +1943,7 @@ def crawl_synth_v1(
         )
 
     policy.solved_task_ids.intersection_update(training_set)
+    policy.seen_task_ids.intersection_update(training_set)
     unsolved = training_set - policy.solved_task_ids
     attempts: list[CrawlTaskAttempt] = []
     solutions: dict[str, Kelschinator] = {}
@@ -1945,6 +1954,7 @@ def crawl_synth_v1(
         and policy.total_gene_generations < max_total_generations
     ):
         task_id = None
+        selection_mode = "priority"
 
         while first_queue and task_id is None:
             candidate = first_queue.popleft()
@@ -1952,17 +1962,21 @@ def crawl_synth_v1(
                 task_id = candidate
 
         if task_id is None:
+            selection_mode = "random-with-replacement"
             choices = sorted(unsolved)
             task_id = choices[
                 int(rng.integers(len(choices)))
             ]
 
         policy.task_attempts += 1
+        policy.seen_task_ids.add(task_id)
         run_id = policy.task_attempts
 
         if verbosity >= 1:
             print(
                 f"[crawl task {policy.task_attempts}] {task_id} | "
+                f"selection={selection_mode} | "
+                f"unique_seen={len(policy.seen_task_ids)}/{len(training_set)} | "
                 f"solved={len(policy.solved_task_ids)}/{len(training_set)} | "
                 f"GP generations={policy.total_gene_generations:,} | "
                 f"C={policy.exploration_coefficient():.4f}"
