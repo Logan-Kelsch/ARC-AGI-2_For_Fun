@@ -1148,6 +1148,9 @@ def apply_bundled_operation(
     reject_semantic_duplicate: bool = True,
 ) -> int:
     """Append exactly one bundled gene for one operation invocation."""
+    if isinstance(op, str):
+        refresh_bundled_registries()
+
     info = (
         BUNDLED_OP_REGISTRY[str(op)]
         if isinstance(op, str)
