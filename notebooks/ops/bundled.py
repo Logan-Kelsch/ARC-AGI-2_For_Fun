@@ -454,7 +454,14 @@ class BundledSolutionTree:
         if info.partition not in {"and", "or"}:
             return
 
-        if info.name == "partition_shape":
+        if info.name in {
+            "partition_shape",
+            "partition_bool_trim",
+        }:
+            # These inverses require reconstruction context beyond their direct
+            # emitted components. partition_shape is handled explicitly by the
+            # initial shape+composite root branch; trim needs a source-shape
+            # proof before it can become an executable ST alternative.
             return
 
         manifest = bundle_manifest(SP_meta, generated_gidx)
@@ -1005,6 +1012,9 @@ def build_bundled_operation_values(
     The legacy outputs are grouped into rows and all rows are stored inside one
     object-valued gene.
     """
+    if isinstance(op, str):
+        refresh_bundled_registries()
+
     info = (
         BUNDLED_OP_REGISTRY[str(op)]
         if isinstance(op, str)
@@ -1249,6 +1259,9 @@ def apply_bundled_inverse(
     *values: Any,
 ) -> Any:
     """Flatten bundled arguments and dispatch to the legacy inverse."""
+    if isinstance(inverse, str):
+        refresh_bundled_registries()
+
     info = (
         BUNDLED_INV_OP_REGISTRY[str(inverse)]
         if isinstance(inverse, str)
@@ -1295,6 +1308,17 @@ LEGACY_INV_OP_REGISTRY = INV_OP_REGISTRY
 BUNDLED_OP_REGISTRY, BUNDLED_INV_OP_REGISTRY = (
     _build_bundled_registries()
 )
+
+
+def refresh_bundled_registries() -> None:
+    """Synchronize bundled adapters with the live legacy registries."""
+    operations, inverses = _build_bundled_registries()
+
+    BUNDLED_OP_REGISTRY.clear()
+    BUNDLED_OP_REGISTRY.update(operations)
+
+    BUNDLED_INV_OP_REGISTRY.clear()
+    BUNDLED_INV_OP_REGISTRY.update(inverses)
 
 
 def _source_gene_candidates(
@@ -1351,6 +1375,7 @@ def GP_generate_bundled(
     if n_new_genes < 0:
         raise ValueError("n_new_genes must be >= 0.")
 
+    refresh_bundled_registries()
     rng = _rng(rng)
     allowed = (
         None
@@ -1421,6 +1446,7 @@ def SP_generate_bundled(
             "SP_generate_bundled requires SP-side ProgramMeta/ProgramX."
         )
 
+    refresh_bundled_registries()
     rng = _rng(rng)
     allowed = (
         None
