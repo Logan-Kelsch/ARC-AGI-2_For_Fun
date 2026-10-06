@@ -195,7 +195,7 @@ def test_subject_partition_keeps_all_subject_triples_in_one_gene():
         np.array(
             [
                 [0, 1, 0, 0],
-                [0, 0, 1, 0],
+                [0, 0, 0, 1],
             ],
             dtype=bool,
         ),
