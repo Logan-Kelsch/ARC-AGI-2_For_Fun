@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import asdict, dataclass, field
-from itertools import combinations, permutations
+from itertools import (
+    combinations,
+    combinations_with_replacement,
+    permutations,
+    product,
+)
 import json
 import math
 from pathlib import Path
@@ -12,6 +17,24 @@ from typing import Any, Iterable
 import numpy as np
 
 from .environment import ProgramMeta, ProgramX, SolutionTree, init_env
+from .bundled import (
+    BUNDLED_OP_REGISTRY,
+    BundledOperationInfo,
+    BundledSolutionTree,
+    ComponentPairEvaluationCache,
+    GP_prune_bundled,
+    SP_generate_bundled,
+    apply_bundled_operation,
+    build_bundled_operation_values,
+    component_dims,
+    component_dtype_strings,
+    component_gene,
+    component_refs_for_gene,
+    init_env_bundled,
+    materialize_legacy_environment,
+    refresh_bundled_registries,
+    solve_bundled_frontier,
+)
 from .kelschinator import Kelschinator
 from .ops import (
     GP_prune,
