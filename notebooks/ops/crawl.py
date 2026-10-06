@@ -809,18 +809,110 @@ def _solver_gene_ids(
     return result
 
 
+def _arm_selection_probabilities(
+    scores: Iterable[float],
+    *,
+    mode: str,
+) -> np.ndarray:
+    """Normalize arm scores for modular operation selection.
+
+    Modes
+    -----
+    l1:
+        Probability is score / sum(scores). Scores must be non-negative.
+        Falls back to uniform when all scores are zero.
+
+    softmax:
+        Probability is the stable base-e softmax over raw scores.
+
+    argmax:
+        Returns a one-hot vector at the first maximum score.
+    """
+    values = np.asarray(list(scores), dtype=float)
+
+    if values.ndim != 1 or len(values) == 0:
+        raise ValueError("Arm selection requires at least one score.")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("Arm scores must be finite.")
+
+    mode = str(mode).strip().lower()
+
+    if mode == "l1":
+        if np.any(values < 0.0):
+            raise ValueError(
+                "L1 arm selection requires non-negative scores."
+            )
+
+        total = float(np.sum(values))
+
+        if total <= 0.0:
+            return np.full(
+                len(values),
+                1.0 / float(len(values)),
+                dtype=float,
+            )
+
+        return values / total
+
+    if mode == "softmax":
+        shifted = values - np.max(values)
+        weights = np.exp(shifted)
+        return weights / np.sum(weights)
+
+    if mode == "argmax":
+        probabilities = np.zeros(len(values), dtype=float)
+        probabilities[int(np.argmax(values))] = 1.0
+        return probabilities
+
+    raise ValueError(
+        "operation_selection must be one of "
+        "'l1', 'softmax', or 'argmax'."
+    )
+
+
+def _select_arm_index(
+    scores: Iterable[float],
+    *,
+    mode: str,
+    rng: np.random.Generator,
+) -> int:
+    """Select one arm using the requested normalized-score policy."""
+    probabilities = _arm_selection_probabilities(
+        scores,
+        mode=mode,
+    )
+
+    if str(mode).strip().lower() == "argmax":
+        return int(np.argmax(probabilities))
+
+    return int(
+        rng.choice(
+            len(probabilities),
+            p=probabilities,
+        )
+    )
+
+
 def _choose_operation(
     policy: GrammarUCTPolicy,
     infos: list[OperationInfo],
+    *,
+    selection_mode: str,
+    rng: np.random.Generator,
 ) -> OperationInfo:
-    ranked = sorted(
-        enumerate(infos),
-        key=lambda item: (
-            -policy.operation_score(item[1].name)[0],
-            item[0],
-        ),
+    if not infos:
+        raise ValueError("Operation selection requires at least one operation.")
+
+    scores = [
+        policy.operation_score(info.name)[0]
+        for info in infos
+    ]
+    selected = _select_arm_index(
+        scores,
+        mode=selection_mode,
+        rng=rng,
     )
-    return ranked[0][1]
+    return infos[selected]
 
 
 def _source_component_scores(
@@ -1020,6 +1112,7 @@ def _next_uct_candidate(
     *,
     rng: np.random.Generator,
     source_probe_attempts: int,
+    operation_selection: str,
 ) -> tuple[OperationInfo, Any, dict[str, Any], GrammarSourceKey] | None:
     """Return depth-0 coverage first, then operation->source UCT choices."""
 
@@ -1089,7 +1182,12 @@ def _next_uct_candidate(
     remaining = _eligible_operation_infos(side="GP")
 
     while remaining:
-        info = _choose_operation(policy, remaining)
+        info = _choose_operation(
+            policy,
+            remaining,
+            selection_mode=operation_selection,
+            rng=rng,
+        )
         params = sample_operation_params(info, rng)
         selected = _select_source_for_operation(
             policy,
@@ -1552,6 +1650,7 @@ def _run_crawl_task(
     task_generation_budget: int,
     global_generation_budget: int,
     source_probe_attempts: int,
+    operation_selection: str,
     rng: np.random.Generator,
     data_root: str | Path | None,
     select_residual_max_destinations: int,
@@ -1647,6 +1746,7 @@ def _run_crawl_task(
                 GP_X,
                 rng=rng,
                 source_probe_attempts=source_probe_attempts,
+                operation_selection=operation_selection,
             )
 
             if candidate is None:
@@ -1818,6 +1918,7 @@ def crawl_synth_v1(
     exploration_horizon: int = 1_000_000,
     depth_exploration_power: float = 1.0,
     depth_focus: float = 0.0,
+    operation_selection: str = "l1",
     source_probe_attempts: int = 32,
     rng: np.random.Generator | int | None = None,
     data_root: str | Path | None = None,
@@ -1840,7 +1941,10 @@ def crawl_synth_v1(
     initialization GP pool. Coverage probability is min(1, C), where C is the
     decaying global exploration coefficient: it is exhaustive at the start and
     falls to about 5% when C reaches 0.05. After that, GP generation uses
-    operation-first UCT followed by source-phenotype UCT.
+    operation-first UCT followed by source-phenotype UCT. Operation arms are
+    selected stochastically by default using L1-normalized
+    (exploitation + exploration) scores; softmax and deterministic argmax
+    policies are also available.
 
     Exploitation is sqrt(solve_credit / visits). A newly successful GP solver
     sends reward backward through generated GP lineage with discount gamma.
@@ -1870,6 +1974,13 @@ def crawl_synth_v1(
     source_probe_attempts = int(source_probe_attempts)
     status_every = int(status_every)
     stall_task_limit = int(stall_task_limit)
+
+    operation_selection = str(operation_selection).strip().lower()
+    if operation_selection not in {"l1", "softmax", "argmax"}:
+        raise ValueError(
+            "operation_selection must be one of "
+            "'l1', 'softmax', or 'argmax'."
+        )
 
     if max_GP < 1:
         raise ValueError("max_GP must be >= 1.")
@@ -2001,6 +2112,7 @@ def crawl_synth_v1(
             task_generation_budget=task_budget,
             global_generation_budget=max_total_generations,
             source_probe_attempts=source_probe_attempts,
+            operation_selection=operation_selection,
             rng=rng,
             data_root=data_root,
             select_residual_max_destinations=(

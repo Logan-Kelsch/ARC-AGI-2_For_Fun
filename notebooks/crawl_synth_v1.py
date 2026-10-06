@@ -64,6 +64,16 @@ def _parse_args() -> argparse.Namespace:
         help="Deprecated compatibility parameter; no longer adds deep bias.",
     )
     parser.add_argument(
+        "--operation-selection",
+        choices=("l1", "softmax", "argmax"),
+        default="l1",
+        help=(
+            "Operation-arm selection policy. l1 samples proportional to "
+            "exploit+explore score; softmax samples from exp(score); "
+            "argmax reproduces deterministic highest-score selection."
+        ),
+    )
+    parser.add_argument(
         "--source-probe-attempts",
         type=int,
         default=32,
@@ -101,6 +111,7 @@ def main() -> None:
         exploration_horizon=args.exploration_horizon,
         depth_exploration_power=args.depth_exploration_power,
         depth_focus=args.depth_focus,
+        operation_selection=args.operation_selection,
         source_probe_attempts=args.source_probe_attempts,
         rng=args.seed,
         data_root=args.data_root,

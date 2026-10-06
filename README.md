@@ -1124,6 +1124,19 @@ generation 0:         C = 8.0
 generation 1,000,000: C = 0.05
 ```
 
+Operation-arm selection is modular. The default is stochastic L1 sampling:
+
+```text
+score_i = exploitation_i + exploration_i
+p_i = score_i / sum(score)
+```
+
+If all candidate scores are zero, selection falls back to uniform random.
+`operation_selection="softmax"` instead uses a stable base-e softmax over the
+same scores, while `operation_selection="argmax"` retains the old
+deterministic highest-score policy. This switch affects operation selection
+only; source selection remains unchanged.
+
 The source-UCT key is transferable across tasks and currently includes:
 
 - operation
@@ -1157,6 +1170,7 @@ crawl = crawl_synth_v1(
     prune_size_GP=5,
     max_total_generations=1_000_000,
     gamma=0.85,
+    operation_selection="l1",
     verbosity=3,
     state_path="crawl_uct_state.json",
 )
