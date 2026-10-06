@@ -1132,9 +1132,18 @@ The source-UCT key is transferable across tasks and currently includes:
 - source atomic dtype signatures
 - coarse shape classes (`square/rect`, `fixed/variable`, `small/medium/large`)
 
-A small positive `depth_focus` term makes post-coverage search somewhat
-depth-first while still allowing learned solve rates to determine the long-run
-depth preference.
+Source exploration is explicitly discounted by depth:
+
+```text
+depth_multiplier(d) = 1 / log2(d + 2)
+```
+
+with the default `depth_exploration_power=1.0`. This gives depth 0 the full
+exploration bonus, depth 1 about 63%, depth 2 exactly 50%, and depth 6 about
+33%. The ordinary UCT visit penalty still applies, so sufficiently explored
+shallow choices naturally yield to less-visited deeper choices. Exploitation is
+not depth-discounted, so useful deep structures can still dominate once they
+demonstrate solve value.
 
 Notebook usage:
 
@@ -1158,7 +1167,9 @@ drawn randomly with replacement from the currently unsolved training set.
 Exactly solved tasks are removed from that set.
 
 `verbosity=2` prints per-task search progress. `verbosity=3` additionally plots
-the current exploitation and exploration distributions by source depth.
+the current exploitation and exploration distributions by source depth. Plot
+depths are automatically aggregated into logarithmic bins
+(`0`, `1`, `2-3`, `4-7`, `8-15`, ...) so long crawls remain readable.
 Successful tasks plot each test input, predicted output, and known expected
 output. Plotting is lazy/optional; the core package still only requires NumPy.
 
