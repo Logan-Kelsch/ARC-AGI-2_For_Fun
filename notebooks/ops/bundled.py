@@ -10,8 +10,11 @@ from .environment import (
     ProgramMeta,
     ProgramX,
     STInverseRef,
+    STNode,
     STNodeRef,
     STSet,
+    SolutionTree,
+    source_indices,
 )
 from .inv_ops import INV_OP_REGISTRY, InverseOperationInfo
 from .ops import (
@@ -1763,6 +1766,548 @@ def solve_bundled_frontier(
         )
 
     return solved
+
+
+
+def _physical_source_tuple(source: Any) -> tuple[int, ...]:
+    """Preserve physical source multiplicity for bundled lineage."""
+    if isinstance(source, np.generic):
+        source = source.item()
+
+    if isinstance(source, np.ndarray):
+        source = source.tolist()
+
+    if isinstance(source, (list, tuple)):
+        return tuple(int(value) for value in source if int(value) >= 0)
+
+    value = int(source)
+    return () if value < 0 else (value,)
+
+
+def _legacy_params(meta: ProgramMeta, gidx: int) -> dict[str, Any]:
+    return {
+        str(key): _copy_value(value)
+        for key, value in meta.params[int(gidx)].items()
+        if str(key) != BUNDLE_META_KEY
+    }
+
+
+def materialize_legacy_program(
+    meta: ProgramMeta,
+    X: ProgramX,
+) -> tuple[
+    ProgramMeta,
+    ProgramX,
+    dict[GeneComponentRef, int],
+]:
+    """Expand one bundled program into a temporary legacy component program.
+
+    This is intentionally a compiler bridge, not search storage. The bundled
+    program remains untouched. Each semantic component is materialized once in
+    a temporary ProgramMeta/ProgramX so the existing Kelschinator can compile
+    the solved proof without learning about the bundled representation.
+
+    Component lineage is reconstructed from the bundle manifest. In particular,
+    a physical bundled gene that contains multiple logical applications becomes
+    multiple legacy transition groups with the correct source component refs.
+    """
+    legacy_meta = ProgramMeta(side=meta.side)
+    legacy_X = ProgramX(
+        side=X.side,
+        sample_count=X.sample_count,
+    )
+    ref_to_gidx: dict[GeneComponentRef, int] = {}
+
+    for physical_gidx in range(len(X)):
+        manifest = bundle_manifest(meta, physical_gidx)
+        physical_sources = _physical_source_tuple(
+            meta.source[physical_gidx]
+        )
+
+        if manifest is None:
+            ref = component_ref(meta, physical_gidx, ())
+            values = component_gene_by_gidx(
+                X,
+                physical_gidx,
+                (),
+            )
+
+            if not physical_sources:
+                legacy_source: Any = -1
+            else:
+                mapped_sources = tuple(
+                    ref_to_gidx[
+                        component_ref(meta, parent_gidx, ())
+                    ]
+                    for parent_gidx in physical_sources
+                )
+                legacy_source = (
+                    mapped_sources[0]
+                    if len(mapped_sources) == 1
+                    else mapped_sources
+                )
+
+            gidx = legacy_X.append_gene(values)
+            meta_gidx = legacy_meta.append(
+                source=legacy_source,
+                op=meta.op[physical_gidx],
+                dims=_gene_dims(values),
+                params=_legacy_params(meta, physical_gidx),
+            )
+            if gidx != meta_gidx:
+                raise RuntimeError(
+                    "Legacy materialization metadata/data diverged."
+                )
+            ref_to_gidx[ref] = gidx
+            continue
+
+        applications = manifest.get("applications", [])
+
+        for component in manifest.get("components", []):
+            path = tuple(
+                int(value)
+                for value in component["path"]
+            )
+            application_index = int(
+                component["application_index"]
+            )
+
+            if (
+                application_index < 0
+                or application_index >= len(applications)
+            ):
+                raise RuntimeError(
+                    "Bundled component references an invalid application."
+                )
+
+            application = applications[application_index]
+            source_paths = [
+                tuple(int(value) for value in source_path)
+                for source_path in application.get(
+                    "source_paths",
+                    [],
+                )
+            ]
+
+            if len(source_paths) != len(physical_sources):
+                raise RuntimeError(
+                    "Bundled manifest source-path arity does not match "
+                    "physical source arity."
+                )
+
+            mapped_sources = tuple(
+                ref_to_gidx[
+                    component_ref(
+                        meta,
+                        parent_gidx,
+                        source_path,
+                    )
+                ]
+                for parent_gidx, source_path in zip(
+                    physical_sources,
+                    source_paths,
+                )
+            )
+            legacy_source = (
+                -1
+                if not mapped_sources
+                else mapped_sources[0]
+                if len(mapped_sources) == 1
+                else mapped_sources
+            )
+
+            ref = component_ref(
+                meta,
+                physical_gidx,
+                path,
+            )
+            values = component_gene_by_gidx(
+                X,
+                physical_gidx,
+                path,
+            )
+            gidx = legacy_X.append_gene(values)
+            meta_gidx = legacy_meta.append(
+                source=legacy_source,
+                op=meta.op[physical_gidx],
+                dims=int(component["dims"]),
+                params=_legacy_params(meta, physical_gidx),
+            )
+
+            if gidx != meta_gidx:
+                raise RuntimeError(
+                    "Legacy materialization metadata/data diverged."
+                )
+
+            ref_to_gidx[ref] = gidx
+
+    return legacy_meta, legacy_X, ref_to_gidx
+
+
+def _translate_bundled_requirement(
+    requirement: Any,
+    node_id_map: dict[Any, Any],
+) -> Any:
+    if isinstance(requirement, STInverseRef):
+        return STInverseRef(requirement.inverse_op)
+
+    if isinstance(requirement, STNodeRef):
+        return STNodeRef(
+            node_id_map[requirement.node_id]
+        )
+
+    if isinstance(requirement, STSet):
+        return STSet(
+            mode=requirement.mode,
+            members=[
+                _translate_bundled_requirement(
+                    member,
+                    node_id_map,
+                )
+                for member in requirement.members
+            ],
+            label=requirement.label,
+            partition=requirement.partition,
+        )
+
+    raise TypeError(
+        f"Unsupported bundled ST requirement "
+        f"{type(requirement).__name__}."
+    )
+
+
+def materialize_legacy_environment(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    SP_meta: ProgramMeta,
+    SP_X: ProgramX,
+    ST: BundledSolutionTree,
+) -> tuple[
+    ProgramMeta,
+    ProgramX,
+    ProgramMeta,
+    ProgramX,
+    SolutionTree,
+]:
+    """Compile bundled GP/SP/ST state into an ephemeral legacy environment."""
+    legacy_GP_meta, legacy_GP_X, gp_map = (
+        materialize_legacy_program(
+            GP_meta,
+            GP_X,
+        )
+    )
+    legacy_SP_meta, legacy_SP_X, sp_map = (
+        materialize_legacy_program(
+            SP_meta,
+            SP_X,
+        )
+    )
+
+    node_id_map: dict[Any, Any] = {}
+
+    for node_id, node in ST.nodes.items():
+        if node.sp_ref is not None:
+            node_id_map[node_id] = sp_map[node.sp_ref]
+        else:
+            node_id_map[node_id] = node_id
+
+    legacy_nodes: dict[Any, STNode] = {}
+
+    for node_id, node in ST.nodes.items():
+        translated_id = node_id_map[node_id]
+        sp_gidx = (
+            None
+            if node.sp_ref is None
+            else sp_map[node.sp_ref]
+        )
+        gp_gidx = (
+            -1
+            if node.gp_ref is None
+            else gp_map[node.gp_ref]
+        )
+
+        if node.sp_ref is not None:
+            physical_sp_gidx = _gidx_from_gene_id(
+                SP_meta,
+                node.sp_ref.gene_id,
+            )
+            op_name = SP_meta.op[physical_sp_gidx]
+            source = (
+                legacy_SP_meta.source[sp_gidx]
+                if sp_gidx is not None
+                else -1
+            )
+        else:
+            op_name = "bundled_logical"
+            source = -1
+
+        legacy_nodes[translated_id] = STNode(
+            node_id=translated_id,
+            label=node.label,
+            sp_gidx=sp_gidx,
+            op=op_name,
+            dims=node.dims,
+            source=source,
+            gp_gidx=gp_gidx,
+            solution_rule=node.solution_rule,
+            solution_params=dict(node.solution_params),
+            derivation=(
+                None
+                if node.derivation is None
+                else _translate_bundled_requirement(
+                    node.derivation,
+                    node_id_map,
+                )
+            ),
+            innate=node.innate,
+        )
+
+    legacy_ST = SolutionTree(
+        nodes=legacy_nodes,
+        roots=tuple(
+            node_id_map[root]
+            for root in ST.roots
+        ),
+    )
+    legacy_ST.bind_environment(
+        legacy_GP_meta,
+        legacy_GP_X,
+        legacy_SP_X,
+    )
+
+    return (
+        legacy_GP_meta,
+        legacy_GP_X,
+        legacy_SP_meta,
+        legacy_SP_X,
+        legacy_ST,
+    )
+
+
+def _bundled_prune_target_count(
+    prune: int | float,
+    gp_count: int,
+) -> int:
+    if isinstance(prune, bool):
+        raise TypeError(
+            "prune must be an int count or float proportion."
+        )
+
+    if isinstance(prune, (int, np.integer)):
+        value = int(prune)
+        if value < 0:
+            raise ValueError("integer prune count must be >= 0.")
+        return value
+
+    if isinstance(prune, (float, np.floating)):
+        value = float(prune)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                "float prune proportion must be in [0, 1]."
+            )
+        return int(np.floor(value * gp_count))
+
+    raise TypeError(
+        "prune must be an int count or float proportion."
+    )
+
+
+def _bundled_solver_gene_ids(
+    ST: BundledSolutionTree,
+) -> set[int]:
+    return {
+        int(node.gp_ref.gene_id)
+        for node in ST.nodes.values()
+        if node.gp_ref is not None
+    }
+
+
+def _bundled_protected_gene_ids(
+    GP_meta: ProgramMeta,
+    ST: BundledSolutionTree,
+) -> set[int]:
+    live = {
+        GP_meta.stable_id(gidx): gidx
+        for gidx in range(len(GP_meta))
+    }
+    protected = _bundled_solver_gene_ids(ST)
+    stack = list(protected)
+
+    while stack:
+        gene_id = stack.pop()
+        gidx = live.get(gene_id)
+
+        if gidx is None:
+            continue
+
+        for parent_gidx in _physical_source_tuple(
+            GP_meta.source[gidx]
+        ):
+            parent_id = GP_meta.stable_id(parent_gidx)
+
+            if parent_id not in protected:
+                protected.add(parent_id)
+                stack.append(parent_id)
+
+    return protected
+
+
+def _remap_physical_source_after_delete(
+    source: Any,
+    removed_gidx: int,
+) -> Any:
+    indices = _physical_source_tuple(source)
+
+    if removed_gidx in indices:
+        raise RuntimeError(
+            "Cannot prune a bundled GP gene still used by a survivor."
+        )
+
+    if not indices:
+        return -1
+
+    remapped = tuple(
+        index - 1 if index > removed_gidx else index
+        for index in indices
+    )
+    return (
+        remapped[0]
+        if len(remapped) == 1
+        else remapped
+    )
+
+
+def _delete_bundled_gp_gene(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    gidx: int,
+) -> None:
+    gidx = int(gidx)
+
+    for other_gidx, source in enumerate(GP_meta.source):
+        if other_gidx == gidx:
+            continue
+        if gidx in _physical_source_tuple(source):
+            raise RuntimeError(
+                f"Bundled GP gene {gidx} is still referenced."
+            )
+
+    del GP_meta.source[gidx]
+    del GP_meta.op[gidx]
+    del GP_meta.dims[gidx]
+    del GP_meta.params[gidx]
+    del GP_meta.gene_id[gidx]
+    del GP_X.genes[gidx]
+
+    GP_meta.source[:] = [
+        _remap_physical_source_after_delete(
+            source,
+            gidx,
+        )
+        for source in GP_meta.source
+    ]
+
+
+def GP_prune_bundled(
+    GP_meta: ProgramMeta,
+    GP_X: ProgramX,
+    ST: BundledSolutionTree,
+    prune: int | float = 5,
+    *,
+    rng: np.random.Generator | int | None = None,
+) -> list[int]:
+    """Prune whole bundled GP genes while protecting solved component lineage.
+
+    A physical gene is removable only when:
+      - no surviving physical gene uses it as a source;
+      - none of its components solve ST;
+      - it is outside the recursive ancestor closure of all ST-solving refs;
+      - all of its own physical parents have gidx > 0, mirroring the legacy
+        guard that preserves initialization-adjacent grammar structure.
+    """
+    if GP_meta.side != "GP" or GP_X.side != "GP":
+        raise ValueError(
+            "GP_prune_bundled requires GP-side ProgramMeta/ProgramX."
+        )
+
+    target = _bundled_prune_target_count(
+        prune,
+        len(GP_X),
+    )
+
+    if target == 0:
+        return []
+
+    rng = _rng(rng)
+    original_indices = list(range(len(GP_X)))
+    removed: list[int] = []
+
+    while len(removed) < target:
+        protected = _bundled_protected_gene_ids(
+            GP_meta,
+            ST,
+        )
+        referenced = {
+            parent
+            for source in GP_meta.source
+            for parent in _physical_source_tuple(source)
+        }
+        eligible: list[int] = []
+
+        for gidx in range(1, len(GP_X)):
+            gene_id = GP_meta.stable_id(gidx)
+
+            if gene_id in protected:
+                continue
+            if gidx in referenced:
+                continue
+
+            parents = _physical_source_tuple(
+                GP_meta.source[gidx]
+            )
+            if not parents or any(parent <= 0 for parent in parents):
+                continue
+
+            eligible.append(gidx)
+
+        if not eligible:
+            break
+
+        operation_count = max(
+            1,
+            len(BUNDLED_OP_REGISTRY),
+        )
+        denominator = np.log(float(operation_count + 1))
+        scores = []
+
+        for gidx in eligible:
+            parents = _physical_source_tuple(
+                GP_meta.source[gidx]
+            )
+            x = float(np.mean(np.asarray(parents, dtype=float)))
+            scores.append(
+                np.log(x + 1.0) / denominator
+            )
+
+        shifted = np.asarray(scores, dtype=float)
+        shifted -= np.max(shifted)
+        weights = np.exp(shifted)
+        probabilities = weights / weights.sum()
+        selected = eligible[
+            int(rng.choice(len(eligible), p=probabilities))
+        ]
+
+        removed.append(
+            original_indices[selected]
+        )
+        _delete_bundled_gp_gene(
+            GP_meta,
+            GP_X,
+            selected,
+        )
+        del original_indices[selected]
+
+    return removed
 
 
 def _extract_pair_grid(
