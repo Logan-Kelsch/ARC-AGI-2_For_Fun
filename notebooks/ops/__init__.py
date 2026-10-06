@@ -27,6 +27,7 @@ from .bundled import (
     component_refs_for_gene,
     init_env_bundled,
     is_bundled_gene,
+    refresh_bundled_registries,
     solve_bundled_frontier,
     try_bundled_operation,
 )
@@ -188,6 +189,7 @@ __all__ = [
     "SP_generate_bundled",
     "solve_bundled_frontier",
     "init_env_bundled",
+    "refresh_bundled_registries",
     "synth",
     "synth_v2",
     "synth_v3",
