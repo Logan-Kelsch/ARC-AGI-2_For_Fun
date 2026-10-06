@@ -270,6 +270,48 @@ def test_bool_operation_maps_over_compatible_components_in_bundle():
     )
 
 
+def test_binary_operation_can_draw_two_leaves_from_same_bundle():
+    grids = [
+        np.array(
+            [
+                [0, 1],
+                [1, 0],
+            ],
+            dtype=np.int64,
+        ),
+        np.array(
+            [
+                [1, 0],
+                [0, 1],
+            ],
+            dtype=np.int64,
+        ),
+    ]
+    meta, X = _program("GP", grids)
+
+    composite_gidx = apply_bundled_operation(
+        meta,
+        X,
+        "partition_composite",
+        0,
+    )
+    union_gidx = apply_bundled_operation(
+        meta,
+        X,
+        "bool2_union",
+        (composite_gidx, composite_gidx),
+    )
+
+    # The two distinct Boolean color-mask leaves are valid operands even
+    # though both live inside the same physical source gene.
+    value = X[union_gidx, 0]
+    assert value.shape == (1, 1)
+    assert np.array_equal(
+        value[0, 0],
+        np.ones_like(grids[0], dtype=bool),
+    )
+
+
 def test_subject_partition_keeps_all_subject_triples_in_one_gene():
     samples = [
         np.array(
