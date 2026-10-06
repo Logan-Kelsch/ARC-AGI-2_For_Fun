@@ -2629,9 +2629,9 @@ def test_partition_bool_subjects_uses_8_connected_components():
         X[mask0, 0],
         np.array(
             [
-                [True, False, False, False],
-                [False, True, False, True],
-                [False, False, True, True],
+                [True, False, False, False, False],
+                [False, True, False, True, True],
+                [False, False, True, True, False],
             ],
             dtype=bool,
         ),

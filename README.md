@@ -1211,3 +1211,88 @@ python notebooks/crawl_synth_v1.py \
   --verbosity 3
 ```
 
+
+## Bundled one-slot gene architecture
+
+A parallel bundled representation now exists in `notebooks/ops/bundled.py`.
+The legacy `OP_REGISTRY`, `INV_OP_REGISTRY`, `GP_generate`,
+`SP_generate`, `init_env`, and solver/cache APIs are unchanged.
+
+The bundled path changes the storage invariant from:
+
+```text
+one operation call
+    -> N output genes
+```
+
+to:
+
+```text
+one operation call
+    -> exactly one stored gene
+       -> object-valued component rows
+```
+
+Examples for one sample:
+
+```text
+partition_shape
+[[h, w]]
+
+partition_composite
+[[color_0, mask_0],
+ [color_1, mask_1],
+ ...]
+
+partition_bool_trim
+[[y_offset, x_offset, trimmed_mask]]
+
+partition_bool_subjects
+[[y_0, x_0, subject_mask_0],
+ [y_1, x_1, subject_mask_1],
+ ...]
+```
+
+Every legacy registered operation has a corresponding entry in
+`BUNDLED_OP_REGISTRY`, but its bundled `output_count` is always one.
+Operations are evaluated component-wise: when a source gene is already a
+bundle, only compatible leaf components are presented to the underlying
+operation, and all legal results are collected into the new one-slot bundle.
+
+Concrete semantic leaves are identified by:
+
+```python
+GeneComponentRef(gene_id=<stable id>, path=(row, column))
+```
+
+so GP/SP comparison no longer requires materializing every component as another
+gene. `component_gene(...)` creates a temporary sample-axis view for solver
+evaluation only.
+
+The bundled cache is correspondingly sparse and component-aware:
+
+```text
+(gp stable gene id, gp component path)
+        x
+(sp stable gene id, sp component path)
+```
+
+rather than a dense whole-gene matrix. This keeps prior evaluations stable
+through live gidx compaction and distinguishes two components inside the same
+stored gene.
+
+`init_env_bundled(...)` initializes each side with exactly three genes for an
+ordinary ARC grid:
+
+```text
+0 raw grid
+1 bundled shape
+2 bundled composite
+```
+
+and `solve_bundled_frontier(...)` extracts only virtual component views when
+comparing GP to the bundled SP/ST frontier.
+
+Bundled inverse operations live in `BUNDLED_INV_OP_REGISTRY`. Their adapters
+flatten the object bundle only at inverse execution time and delegate the
+mathematical reconstruction/check to the unchanged legacy inverse function.
