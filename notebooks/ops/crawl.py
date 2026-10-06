@@ -1124,20 +1124,25 @@ def _plot_depth_distribution(
     ]
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    depth_positions = np.arange(1, len(depths) + 1)
+    depth_labels = [str(depth) for depth in depths]
+
     axes[0].boxplot(
         exploitation,
-        labels=[str(depth) for depth in depths],
         showfliers=False,
     )
+    axes[0].set_xticks(depth_positions)
+    axes[0].set_xticklabels(depth_labels)
     axes[0].set_title("Exploitation by source depth")
     axes[0].set_xlabel("Source depth")
     axes[0].set_ylabel("sqrt(solve credit / visits)")
 
     axes[1].boxplot(
         exploration,
-        tick_labels=[str(depth) for depth in depths],
         showfliers=False,
     )
+    axes[1].set_xticks(depth_positions)
+    axes[1].set_xticklabels(depth_labels)
     axes[1].set_title("Exploration bonus by source depth")
     axes[1].set_xlabel("Source depth")
     axes[1].set_ylabel("UCT exploration term")
@@ -1659,33 +1664,47 @@ def crawl_synth_v1(
                 )
 
             if show_success_plots:
-                task = _load_task_by_id(
-                    task_id,
-                    data_root=data_root,
-                    split="training",
-                )
-                _plot_success(
-                    task_id,
-                    task,
-                    solution,
-                )
+                try:
+                    task = _load_task_by_id(
+                        task_id,
+                        data_root=data_root,
+                        split="training",
+                    )
+                    _plot_success(
+                        task_id,
+                        task,
+                        solution,
+                    )
+                except Exception as exc:
+                    if verbosity >= 1:
+                        print(
+                            "  warning: success visualization failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
         elif verbosity >= 1:
             print(
                 f"  unresolved after {attempt.generated_genes} GP genes "
                 f"({attempt.elapsed_seconds:.2f}s)"
             )
 
-        if verbosity >= 3:
-            _plot_depth_distribution(
-                policy,
-                title=(
-                    f"Grammar-UCT after {policy.total_gene_generations:,} "
-                    "GP generations"
-                ),
-            )
-
         if state_file is not None:
             policy.save(state_file)
+
+        if verbosity >= 3:
+            try:
+                _plot_depth_distribution(
+                    policy,
+                    title=(
+                        f"Grammar-UCT after "
+                        f"{policy.total_gene_generations:,} GP generations"
+                    ),
+                )
+            except Exception as exc:
+                if verbosity >= 1:
+                    print(
+                        "  warning: UCT depth visualization failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
         if zero_progress_task_attempts >= stall_task_limit:
             if verbosity >= 1:
