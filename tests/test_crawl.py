@@ -18,6 +18,7 @@ from notebooks.ops.crawl import (
     _build_depth0_coverage,
     _build_exploration_heatmap,
     crawl_synth_v1,
+    crawl_synth_v2,
 )
 from notebooks.ops.environment import ProgramMeta, ProgramX
 from notebooks.ops.ops import OP_REGISTRY, operation
@@ -412,6 +413,29 @@ def _write_identity_task(root, task_id):
             }
         )
     )
+
+
+def test_crawl_v2_solves_identity_task_from_bundled_initial_state(tmp_path):
+    _write_identity_task(tmp_path, "identity")
+
+    result = crawl_synth_v2(
+        first_tasks=["identity"],
+        max_GP=20,
+        max_SP=20,
+        prune_size_GP=0,
+        max_total_generations=5,
+        max_task_generations=3,
+        data_root=tmp_path,
+        rng=0,
+        verbosity=0,
+        show_success_plots=False,
+    )
+
+    assert result.solved_task_ids == {"identity"}
+    assert len(result.attempts) == 1
+    assert result.attempts[0].solved_exactly
+    assert result.attempts[0].generated_genes == 0
+    assert result.policy.total_gene_generations == 0
 
 
 def test_seen_task_ids_persist_in_policy_state(tmp_path):
