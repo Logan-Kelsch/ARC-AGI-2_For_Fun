@@ -13,12 +13,59 @@ from notebooks.ops.crawl import (
     _DecisionRecord,
     _TaskUCTState,
     _aggregate_depth_distribution,
+    _arm_selection_probabilities,
+    _select_arm_index,
     _build_depth0_coverage,
     _build_exploration_heatmap,
     crawl_synth_v1,
 )
 from notebooks.ops.environment import ProgramMeta, ProgramX
 from notebooks.ops.ops import OP_REGISTRY, operation
+
+
+def test_l1_arm_selection_normalizes_raw_scores():
+    probabilities = _arm_selection_probabilities(
+        [1.0, 2.0, 3.0],
+        mode="l1",
+    )
+
+    assert np.allclose(
+        probabilities,
+        np.array([1.0, 2.0, 3.0]) / 6.0,
+    )
+
+
+def test_l1_arm_selection_falls_back_to_uniform_for_zero_scores():
+    probabilities = _arm_selection_probabilities(
+        [0.0, 0.0, 0.0],
+        mode="l1",
+    )
+
+    assert np.allclose(
+        probabilities,
+        np.full(3, 1.0 / 3.0),
+    )
+
+
+def test_softmax_arm_selection_uses_stable_exponential_normalization():
+    probabilities = _arm_selection_probabilities(
+        [1.0, 2.0, 3.0],
+        mode="softmax",
+    )
+    expected = np.exp(np.array([-2.0, -1.0, 0.0]))
+    expected /= expected.sum()
+
+    assert np.allclose(probabilities, expected)
+
+
+def test_argmax_arm_selection_remains_available_and_deterministic():
+    index = _select_arm_index(
+        [1.0, 4.0, 2.0],
+        mode="argmax",
+        rng=np.random.default_rng(0),
+    )
+
+    assert index == 1
 
 
 def test_uct_exploitation_is_sqrt_solve_proportion():
