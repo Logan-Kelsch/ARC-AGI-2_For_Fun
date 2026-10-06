@@ -14,6 +14,7 @@ from notebooks.ops.crawl import (
     _TaskUCTState,
     _aggregate_depth_distribution,
     _build_depth0_coverage,
+    _build_exploration_heatmap,
     crawl_synth_v1,
 )
 from notebooks.ops.environment import ProgramMeta, ProgramX
@@ -115,6 +116,103 @@ def test_depth_plot_distribution_uses_logarithmic_bins():
         float(depth) + 0.5
         for depth in range(8, 16)
     ]
+
+
+def test_exploration_heatmap_aligns_depth_bins_by_iteration():
+    history = [
+        (0, {0: 8.0, 1: 5.0}),
+        (1, {0: 7.0, 1: 4.0, 2: 3.0}),
+        (2, {0: 6.0, 2: 2.0, 3: 4.0}),
+    ]
+
+    matrix, labels, iterations = _build_exploration_heatmap(
+        history
+    )
+
+    assert labels == ["0", "1", "2-3"]
+    assert iterations == [0, 1, 2]
+    assert np.allclose(
+        matrix[0],
+        [8.0, 7.0, 6.0],
+        equal_nan=True,
+    )
+    assert np.allclose(
+        matrix[1],
+        [5.0, 4.0, np.nan],
+        equal_nan=True,
+    )
+    assert np.allclose(
+        matrix[2],
+        [np.nan, 3.0, 3.0],
+        equal_nan=True,
+    )
+
+
+def test_loaded_crawl_prints_grammar_summary_and_operation_ranks(
+    tmp_path,
+    capsys,
+):
+    _write_identity_task(tmp_path, "first")
+
+    policy = GrammarUCTPolicy(
+        total_gene_generations=10,
+        total_decisions=8,
+        task_attempts=3,
+    )
+    policy.operation_stats = {
+        "strong_op": UCTStat(
+            visits=4,
+            solve_credit=4.0,
+        ),
+        "weak_op": UCTStat(
+            visits=4,
+            solve_credit=1.0,
+        ),
+    }
+    policy.source_stats = {
+        GrammarSourceKey(
+            op_name="strong_op",
+            source_depth=0,
+            source_dims=(2,),
+            source_dtypes=("bool",),
+            source_shapes=("square:fixed:small",),
+        ): UCTStat(
+            visits=4,
+            solve_credit=4.0,
+        ),
+        GrammarSourceKey(
+            op_name="weak_op",
+            source_depth=2,
+            source_dims=(2,),
+            source_dtypes=("bool",),
+            source_shapes=("square:fixed:small",),
+        ): UCTStat(
+            visits=4,
+            solve_credit=1.0,
+        ),
+    }
+
+    state_path = tmp_path / "grammar.json"
+    policy.save(state_path)
+
+    crawl_synth_v1(
+        max_GP=50,
+        max_SP=50,
+        prune_size_GP=0,
+        max_total_generations=10,
+        data_root=tmp_path,
+        state_path=state_path,
+        verbosity=1,
+        show_success_plots=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "[loaded Grammar-UCT]" in output
+    assert "depth grammar:" in output
+    assert "strongest operations:" in output
+    assert "strong_op:" in output
+    assert "weakest operations:" in output
+    assert "weak_op:" in output
 
 
 def test_gamma_backpropagates_solver_credit_through_gp_decisions():
