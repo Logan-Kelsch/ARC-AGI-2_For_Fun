@@ -1167,15 +1167,21 @@ drawn randomly with replacement from the currently unsolved training set.
 Exactly solved tasks are removed from that set.
 
 `verbosity=2` prints per-task search progress. `verbosity=3` additionally plots
-the current exploitation and exploration distributions by source depth. Plot
-depths are automatically aggregated into logarithmic bins
-(`0`, `1`, `2-3`, `4-7`, `8-15`, ...) so long crawls remain readable.
+learned depth behavior. Exploitation remains a boxplot by logarithmic source-
+depth bins (`0`, `1`, `2-3`, `4-7`, `8-15`, ...). Exploration is shown as an
+`imshow` heatmap with source-depth bins on the y-axis and task iteration on the
+x-axis, so the evolution of the UCT exploration pressure is visible during a
+task. Very long task histories are display-sampled to at most 500 columns.
 Successful tasks plot each test input, predicted output, and known expected
 output. Plotting is lazy/optional; the core package still only requires NumPy.
 
 The policy state can be resumed through `state_path`. It stores learned grammar
 statistics, solved task IDs, task-attempt count, and the global GP-generation
-counter, but not transient GP/SP graphs from an interrupted task.
+counter, but not transient GP/SP graphs from an interrupted task. When a saved
+state is loaded with `verbosity >= 1`, the crawl prints a grammar summary before
+new work begins: current global exploration coefficient, exploitation and
+exploration means across source-depth bins, and the strongest/weakest learned
+operations ranked by exploitation score with visits and solve credit.
 
 A CLI entry point is also available:
 
